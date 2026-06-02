@@ -1,23 +1,19 @@
-// Google Drive helpers — uses plain fetch with access token
+// Google Drive helpers — all API calls proxied through /api/google on our server.
+// The server adds the Authorization header; no token is needed client-side.
 const Drive = {
   folderId: null,
   stateFileId: null,
   state: { reportedTxIds: {}, categoryPrefs: null, receipts: {} },
-  _getToken: null,
 
-  token() { return this._getToken ? this._getToken() : null; },
-
-  async init(getTokenFn) {
-    this._getToken = getTokenFn;
+  async init() {
     this.folderId = await this.getOrCreateFolder(CONFIG.DRIVE_FOLDER_NAME);
     await this.loadState();
   },
 
+  // Proxy all Google API calls through our server
   async apiFetch(url, options = {}) {
-    const res = await fetch(url, {
-      ...options,
-      headers: { 'Authorization': 'Bearer ' + this.token(), ...(options.headers || {}) }
-    });
+    const proxyUrl = url.replace('https://www.googleapis.com/', '/api/google/');
+    const res = await fetch(proxyUrl, options);
     if (!res.ok) {
       const err = await res.text();
       throw new Error(`Drive API error ${res.status}: ${err}`);

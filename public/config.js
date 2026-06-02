@@ -1,6 +1,4 @@
 const CONFIG = {
-  GOOGLE_CLIENT_ID: '760020007329-329uni070n7doqke2b33q011la177lor.apps.googleusercontent.com',
-  GOOGLE_SCOPES: 'https://www.googleapis.com/auth/drive.file',
   DRIVE_FOLDER_NAME: 'Izzy Report Tool',
   PIN_HASH: '190968',
   YNAB_BUDGETS: [
