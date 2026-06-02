@@ -1,0 +1,977 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Izzy Report Tool</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet"/>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg: #f5f4f0; --surface: #fff; --border: #e2e0d8; --border-strong: #c8c5bb;
+  --text: #1a1916; --text-2: #6b6860; --text-3: #9c9a94;
+  --accent: #2d5a3d; --accent-light: #e8f0eb; --accent-text: #1d3d29;
+  --warn: #92400e; --warn-bg: #fef3c7;
+  --info: #1e40af; --info-bg: #eff6ff;
+  --danger: #991b1b; --danger-bg: #fef2f2;
+  --split-bg: #f0f7ff; --reported-bg: #f9f5ff; --reported-text: #6d28d9;
+  --radius: 8px; --radius-lg: 12px;
+  --mono: 'DM Mono', monospace; --sans: 'DM Sans', sans-serif;
+}
+body { font-family: var(--sans); background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.5; min-height: 100vh; }
+header { background: var(--accent); color: white; padding: 1rem 1.5rem; display: flex; align-items: center; justify-content: space-between; }
+header h1 { font-size: 16px; font-weight: 500; }
+header .mode-badge { font-size: 11px; background: rgba(255,255,255,0.2); padding: 3px 10px; border-radius: 20px; }
+.main { max-width: 1100px; margin: 0 auto; padding: 1.5rem; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 1.25rem 1.5rem; margin-bottom: 1.25rem; }
+.card-title { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-2); margin-bottom: 1rem; }
+.row { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; }
+.field { display: flex; flex-direction: column; gap: 4px; }
+.field label { font-size: 12px; color: var(--text-2); font-weight: 500; }
+input[type="password"], input[type="text"], input[type="date"], input[type="number"] {
+  font-family: var(--sans); font-size: 13px; border: 1px solid var(--border-strong);
+  border-radius: var(--radius); padding: 7px 10px; background: var(--surface); color: var(--text); outline: none;
+}
+input:focus { border-color: var(--accent); }
+button {
+  font-family: var(--sans); font-size: 13px; font-weight: 500; border-radius: var(--radius);
+  border: 1px solid var(--border-strong); background: var(--surface); color: var(--text);
+  padding: 8px 14px; cursor: pointer; white-space: nowrap; transition: all 0.15s;
+}
+button:hover { background: var(--bg); border-color: var(--accent); }
+button.primary { background: var(--accent); color: white; border-color: var(--accent); }
+button.primary:hover { background: var(--accent-text); }
+button.danger { color: var(--danger); border-color: var(--danger); }
+button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* Pills */
+.pill-group { display: flex; gap: 6px; flex-wrap: wrap; }
+.pill { font-size: 12px; padding: 4px 10px; border-radius: 20px; border: 1px solid var(--border-strong); background: var(--surface); cursor: pointer; user-select: none; transition: all 0.15s; }
+.pill.active { background: var(--accent); color: white; border-color: var(--accent); }
+.pill .tag { font-size: 10px; opacity: 0.75; font-family: var(--mono); margin-left: 3px; }
+
+/* Summary bar */
+.summary-bar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-bottom: 1rem; }
+.stats { display: flex; gap: 16px; flex-wrap: wrap; }
+.stat { font-size: 13px; color: var(--text-2); }
+.stat strong { color: var(--text); font-weight: 600; }
+
+/* Table */
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+thead th { text-align: left; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-3); padding: 8px 8px; border-bottom: 1px solid var(--border); background: var(--bg); position: sticky; top: 0; z-index: 1; }
+tbody tr { border-bottom: 1px solid var(--border); transition: background 0.1s; }
+tbody tr:last-child { border-bottom: none; }
+tbody tr:hover { background: #fafaf8; }
+tbody tr.selected { background: var(--accent-light); }
+tbody tr.reported { background: var(--reported-bg); }
+tbody tr.split-parent { border-bottom: none; }
+tbody tr.split-row { background: var(--split-bg); }
+tbody tr.split-row:hover { background: #e4f0fc; }
+tbody tr.split-row.split-selected { background: #cce3f8; }
+tbody tr.split-row td { font-size: 12px; color: var(--text-2); padding-top: 5px; padding-bottom: 5px; }
+tbody tr.split-last { border-bottom: 1px solid var(--border); }
+tbody tr.budget-header td { background: var(--bg); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-2); padding: 10px 8px 6px; border-bottom: 1px solid var(--border); }
+td { padding: 8px; vertical-align: top; }
+.col-check { width: 32px; }
+.col-date { width: 88px; font-family: var(--mono); font-size: 12px; }
+.col-payee { width: 20%; }
+.col-cat { width: 18%; }
+.col-amount { width: 95px; text-align: right; font-family: var(--mono); }
+.col-receipt { width: 60px; text-align: center; }
+.table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius-lg); max-height: 60vh; overflow-y: auto; }
+
+/* Badges */
+.badge { display: inline-block; font-size: 10px; font-weight: 600; padding: 1px 5px; border-radius: 4px; vertical-align: middle; margin-left: 3px; }
+.badge-split { background: var(--info-bg); color: var(--info); }
+.badge-curr { background: var(--warn-bg); color: var(--warn); font-family: var(--mono); }
+.badge-reported { background: var(--reported-bg); color: var(--reported-text); }
+
+.split-indent { padding-left: 24px !important; }
+.split-arrow { color: var(--text-3); margin-right: 3px; }
+.empty { padding: 2rem; text-align: center; color: var(--text-3); font-size: 13px; }
+.error-msg { color: var(--danger); background: var(--danger-bg); border-radius: var(--radius); padding: 8px 12px; font-size: 13px; margin-top: 8px; }
+.success-msg { color: #065f46; background: #d1fae5; border-radius: var(--radius); padding: 8px 12px; font-size: 13px; margin-top: 8px; }
+.note { font-size: 12px; color: var(--text-3); margin-top: 6px; }
+.section-hidden { display: none; }
+
+/* Category filter */
+.cat-filter-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 6px; max-height: 200px; overflow-y: auto; }
+.cat-check { display: flex; align-items: center; gap: 6px; font-size: 13px; padding: 4px 0; }
+.cat-check input { margin: 0; }
+
+/* Rates */
+.rates-row { display: flex; gap: 12px; flex-wrap: wrap; }
+.rate-field { display: flex; flex-direction: column; gap: 4px; }
+.rate-field label { font-size: 12px; color: var(--text-2); font-weight: 500; }
+.rate-field input { width: 160px; }
+
+/* Cash form */
+.cash-form { display: grid; grid-template-columns: 100px 1fr 1fr 1fr 90px auto; gap: 8px; align-items: end; padding: 10px; background: var(--bg); border-radius: var(--radius); margin-bottom: 8px; }
+@media (max-width: 700px) { .cash-form { grid-template-columns: 1fr 1fr; } }
+.cash-form input { width: 100%; }
+.cash-item { display: flex; gap: 8px; align-items: center; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 6px; font-size: 12px; background: var(--surface); flex-wrap: wrap; }
+.cash-item .mono { font-family: var(--mono); }
+
+/* Receipt modal */
+#receiptModal { display: none; position: fixed; inset: 0; background: rgba(26,25,22,0.6); z-index: 300; align-items: center; justify-content: center; padding: 1rem; }
+#receiptModal.show { display: flex; }
+.modal-box { background: var(--surface); border-radius: var(--radius-lg); padding: 1.5rem; width: 100%; max-width: 420px; }
+.modal-title { font-size: 14px; font-weight: 600; margin-bottom: 4px; }
+.modal-sub { font-size: 12px; color: var(--text-2); margin-bottom: 1rem; }
+.drop-zone { border: 2px dashed var(--border-strong); border-radius: var(--radius-lg); padding: 1.5rem 1rem; text-align: center; cursor: pointer; transition: all 0.15s; color: var(--text-3); background: var(--bg); position: relative; }
+.drop-zone:hover, .drop-zone.drag-over { border-color: var(--accent); background: var(--accent-light); color: var(--accent-text); }
+.drop-zone input[type="file"] { position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%; }
+.drop-zone .drop-icon { font-size: 24px; margin-bottom: 6px; }
+.drop-zone .drop-text { font-size: 13px; }
+.drop-zone .drop-hint { font-size: 11px; margin-top: 4px; }
+.modal-preview { margin-top: 1rem; display: none; }
+.modal-preview img { width: 100%; max-height: 160px; object-fit: contain; border-radius: var(--radius); border: 1px solid var(--border); }
+.modal-preview .preview-name { font-size: 11px; color: var(--text-2); margin-top: 4px; text-align: center; }
+.modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 1rem; flex-wrap: wrap; }
+
+/* Loading */
+#loadingOverlay { display: none; position: fixed; inset: 0; background: rgba(245,244,240,0.88); z-index: 200; align-items: center; justify-content: center; flex-direction: column; gap: 12px; }
+#loadingOverlay.show { display: flex; }
+.spinner { width: 32px; height: 32px; border: 3px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.7s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Auth / PIN screens */
+.center-screen { display: flex; align-items: center; justify-content: center; min-height: 80vh; }
+.auth-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 2rem; width: 100%; max-width: 380px; text-align: center; }
+.auth-card h2 { font-size: 18px; font-weight: 600; margin-bottom: 8px; }
+.auth-card p { font-size: 13px; color: var(--text-2); margin-bottom: 1.5rem; }
+.google-btn { display: flex; align-items: center; justify-content: center; gap: 10px; width: 100%; padding: 10px; border: 1px solid var(--border-strong); border-radius: var(--radius); background: white; font-size: 14px; font-weight: 500; cursor: pointer; margin-bottom: 12px; }
+.pin-input { width: 100%; text-align: center; font-size: 22px; letter-spacing: 8px; font-family: var(--mono); padding: 10px; margin-bottom: 12px; }
+
+/* Mobile */
+@media (max-width: 640px) {
+  .main { padding: 1rem; }
+  .col-cat, .col-memo { display: none; }
+  header h1 { font-size: 14px; }
+}
+
+/* Export buttons */
+.export-row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 8px; }
+</style>
+</head>
+<body>
+
+<div id="loadingOverlay">
+  <div class="spinner"></div>
+  <p style="font-size:13px;color:var(--text-2);" id="loadingMsg">Loading...</p>
+</div>
+
+<!-- Receipt modal -->
+<div id="receiptModal">
+  <div class="modal-box">
+    <div class="modal-title" id="modalTitle">Attach receipt</div>
+    <div class="modal-sub">Drop a screenshot, click to browse, or paste (Cmd+V)</div>
+    <div class="drop-zone" id="dropZone">
+      <input type="file" accept="image/*" id="modalFileInput" capture="environment"/>
+      <div class="drop-icon">📎</div>
+      <div class="drop-text">Drag &amp; drop or tap to take/choose photo</div>
+      <div class="drop-hint">PNG, JPG, HEIC supported</div>
+    </div>
+    <div class="modal-preview" id="modalPreview">
+      <img id="modalPreviewImg" src="" alt="Preview"/>
+      <div class="preview-name" id="modalPreviewName"></div>
+    </div>
+    <div class="modal-actions">
+      <button onclick="closeReceiptModal()">Cancel</button>
+      <button class="danger" id="modalRemoveBtn" style="display:none" onclick="removeCurrentReceipt()">Remove</button>
+      <button class="primary" id="modalSaveBtn" onclick="saveModalReceipt()" disabled>Attach</button>
+    </div>
+  </div>
+</div>
+
+<header>
+  <h1>Izzy Report Tool</h1>
+  <div style="display:flex;align-items:center;gap:10px;">
+    <span class="mode-badge" id="modeBadge">Worker view</span>
+    <button id="signOutBtn" style="display:none;font-size:12px;padding:4px 10px;color:white;border-color:rgba(255,255,255,0.4);background:transparent;" onclick="signOut()">Sign out</button>
+  </div>
+</header>
+
+<!-- Auth screen -->
+<div id="authScreen" class="center-screen">
+  <div class="auth-card">
+    <h2>Izzy Report Tool</h2>
+    <p>Sign in with Google to continue</p>
+    <button class="google-btn" onclick="signIn()">
+      <svg width="18" height="18" viewBox="0 0 18 18"><path fill="#4285F4" d="M16.51 8H8.98v3h4.3c-.18 1-.74 1.48-1.6 2.04v2.01h2.6a7.8 7.8 0 0 0 2.38-5.88c0-.57-.05-.66-.15-1.17z"/><path fill="#34A853" d="M8.98 17c2.16 0 3.97-.72 5.3-1.94l-2.6-2a4.8 4.8 0 0 1-7.18-2.54H1.83v2.07A8 8 0 0 0 8.98 17z"/><path fill="#FBBC05" d="M4.5 10.52a4.8 4.8 0 0 1 0-3.04V5.41H1.83a8 8 0 0 0 0 7.18l2.67-2.07z"/><path fill="#EA4335" d="M8.98 4.18c1.17 0 2.23.4 3.06 1.2l2.3-2.3A8 8 0 0 0 1.83 5.4L4.5 7.49a4.77 4.77 0 0 1 4.48-3.3z"/></svg>
+      Sign in with Google
+    </button>
+    <div id="authError"></div>
+  </div>
+</div>
+
+<!-- PIN screen (full access) -->
+<div id="pinScreen" class="center-screen section-hidden">
+  <div class="auth-card">
+    <h2>Full access</h2>
+    <p>Enter your PIN to unlock report generation and all accounts</p>
+    <input type="password" class="pin-input" id="pinInput" placeholder="••••••" maxlength="10" onkeydown="if(event.key==='Enter') checkPin()" />
+    <button class="primary" style="width:100%;" onclick="checkPin()">Unlock</button>
+    <div id="pinError" style="margin-top:8px;"></div>
+    <button style="margin-top:12px;font-size:12px;color:var(--text-3);border:none;background:none;" onclick="continueAsWorker()">Continue as support worker →</button>
+  </div>
+</div>
+
+<!-- Main app -->
+<div id="appScreen" class="section-hidden">
+<div class="main">
+
+  <!-- YNAB connect -->
+  <div class="card" id="stepConnect">
+    <div class="card-title">Connect to YNAB</div>
+    <div class="row" style="gap:12px;">
+      <div class="field">
+        <label>YNAB API Token</label>
+        <input type="password" id="token" placeholder="Paste your token..." style="width:280px;"/>
+      </div>
+      <div class="field"><label>From</label><input type="date" id="dateFrom"/></div>
+      <div class="field"><label>To</label><input type="date" id="dateTo"/></div>
+      <button class="primary" onclick="loadTransactions()">Load transactions</button>
+    </div>
+    <div id="budgetPillsWrap" class="section-hidden" style="margin-top:12px;">
+      <div class="field" style="margin-bottom:6px;"><label>Accounts</label></div>
+      <div class="pill-group" id="budgetPills"></div>
+    </div>
+    <div id="connectError"></div>
+    <p class="note">Token goes directly to YNAB — never stored here.</p>
+  </div>
+
+  <!-- Category filter (full access only) -->
+  <div class="card section-hidden" id="stepCategories">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;">
+      <div class="card-title" style="margin:0;">Category filter</div>
+      <div style="display:flex;gap:8px;">
+        <button onclick="selectAllCats()">All</button>
+        <button onclick="clearAllCats()">None</button>
+        <button class="primary" onclick="applyCategories()">Apply &amp; save</button>
+      </div>
+    </div>
+    <p style="font-size:12px;color:var(--text-2);margin-bottom:10px;">Tick only Izzy's categories. Unticked categories won't appear in the transaction list.</p>
+    <div class="cat-filter-grid" id="catFilterGrid"></div>
+  </div>
+
+  <!-- Exchange rates (full access only) -->
+  <div class="card section-hidden" id="stepRates">
+    <div class="card-title">Exchange rates</div>
+    <div class="rates-row">
+      <div class="rate-field"><label>EUR → GBP</label><input type="number" id="rateEUR" step="0.0001" placeholder="e.g. 0.856"/></div>
+      <div class="rate-field"><label>USD → GBP</label><input type="number" id="rateUSD" step="0.0001" placeholder="e.g. 0.792"/></div>
+    </div>
+  </div>
+
+  <!-- Transaction table -->
+  <div id="stepSelect" class="section-hidden">
+    <div class="summary-bar">
+      <div class="stats">
+        <div class="stat">Showing <strong id="txCount">0</strong> transactions</div>
+        <div class="stat" id="selectedStat" style="display:none;"><strong id="selectedCount">0</strong> selected · <strong id="selectedTotal">£0.00</strong></div>
+      </div>
+      <div style="display:flex;gap:8px;" id="selectionActions">
+        <button onclick="selectAll()">Select all</button>
+        <button onclick="clearAll()">Clear all</button>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th class="col-check"></th>
+            <th class="col-date">Date</th>
+            <th class="col-payee">Payee</th>
+            <th class="col-cat">Category</th>
+            <th class="col-memo">Memo</th>
+            <th class="col-amount">Amount</th>
+            <th class="col-receipt">Receipt</th>
+          </tr>
+        </thead>
+        <tbody id="txBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Cash transactions (full access only) -->
+  <div class="card section-hidden" id="stepCash">
+    <div class="card-title">Add cash transactions (optional)</div>
+    <div class="cash-form">
+      <div class="field"><label>Date</label><input type="date" id="cashDate"/></div>
+      <div class="field"><label>Payee</label><input type="text" id="cashPayee" placeholder="e.g. Fairground"/></div>
+      <div class="field"><label>Category</label><input type="text" id="cashCat" placeholder="e.g. Activities"/></div>
+      <div class="field"><label>Memo</label><input type="text" id="cashMemo" placeholder="Notes"/></div>
+      <div class="field"><label>Amount (£)</label><input type="number" id="cashAmount" step="0.01" placeholder="0.00"/></div>
+      <button onclick="addCashTransaction()">Add</button>
+    </div>
+    <div id="cashList"></div>
+  </div>
+
+  <!-- Generate (full access only) -->
+  <div class="card section-hidden" id="stepGenerate">
+    <div class="card-title">Generate report</div>
+    <div class="row" style="gap:12px;margin-bottom:12px;">
+      <div class="field">
+        <label>Period label</label>
+        <input type="text" id="reportPeriod" placeholder="e.g. May 2026" style="width:180px;"/>
+      </div>
+    </div>
+    <div class="export-row">
+      <button class="primary" onclick="exportCSV()">⬇ Download CSV</button>
+      <button class="primary" onclick="generateReceiptDoc()">📄 Create receipt Google Doc</button>
+    </div>
+    <p class="note">CSV = transaction table. Google Doc = receipt annex saved to your Drive.</p>
+    <div id="generateMsg"></div>
+  </div>
+
+</div>
+</div>
+
+<script src="config.js"></script>
+<script src="drive.js"></script>
+<script>
+// ─── State ───────────────────────────────────────────────────────────────────
+let isFullAccess = false;
+let allTransactions = [];
+let selectedIds = new Set();
+let selectedSubIds = new Set();
+let cashTransactions = [];
+let activeBudgets = new Set();
+let activeCategories = null; // null = not yet filtered
+let allCategories = [];
+let cashIdCounter = 0;
+
+// Modal state
+let modalTxId = null;
+let modalPendingDataUrl = null;
+let modalPendingFilename = null;
+
+// ─── Google Auth ─────────────────────────────────────────────────────────────
+let gapiReady = false;
+let gisReady = false;
+let tokenClient;
+
+function onGapiLoad() {
+  gapi.load('client', async () => {
+    await gapi.client.init({});
+    await gapi.client.load('https://www.googleapis.com/discovery/v1/apis/drive/v3/rest');
+    gapiReady = true;
+    checkReady();
+  });
+}
+
+function onGisLoad() {
+  tokenClient = google.accounts.oauth2.initTokenClient({
+    client_id: CONFIG.GOOGLE_CLIENT_ID,
+    scope: CONFIG.GOOGLE_SCOPES,
+    callback: async (resp) => {
+      if (resp.error) { showAuthError('Sign-in failed: ' + resp.error); return; }
+      await onSignedIn();
+    }
+  });
+  gisReady = true;
+  checkReady();
+}
+
+function checkReady() {
+  if (gapiReady && gisReady) {
+    // Auto-show sign in
+  }
+}
+
+function signIn() {
+  if (!gapiReady || !gisReady) { showAuthError('Still loading, please wait...'); return; }
+  tokenClient.requestAccessToken({ prompt: 'consent' });
+}
+
+function signOut() {
+  const token = gapi.auth.getToken();
+  if (token) google.accounts.oauth2.revoke(token.access_token, () => {});
+  gapi.auth.setToken(null);
+  location.reload();
+}
+
+async function onSignedIn() {
+  showLoading('Connecting to Google Drive...');
+  try {
+    await Drive.init();
+    hideLoading();
+    document.getElementById('authScreen').classList.add('section-hidden');
+    document.getElementById('signOutBtn').style.display = 'block';
+    document.getElementById('pinScreen').classList.remove('section-hidden');
+  } catch(e) {
+    hideLoading();
+    showAuthError('Drive error: ' + e.message);
+  }
+}
+
+function showAuthError(msg) {
+  document.getElementById('authError').innerHTML = `<div class="error-msg">${msg}</div>`;
+}
+
+// ─── PIN ─────────────────────────────────────────────────────────────────────
+function checkPin() {
+  const pin = document.getElementById('pinInput').value.trim();
+  if (pin === CONFIG.PIN_HASH) {
+    isFullAccess = true;
+    startApp();
+  } else {
+    document.getElementById('pinError').innerHTML = '<div class="error-msg">Incorrect PIN</div>';
+  }
+}
+
+function continueAsWorker() {
+  isFullAccess = false;
+  startApp();
+}
+
+function startApp() {
+  document.getElementById('pinScreen').classList.add('section-hidden');
+  document.getElementById('appScreen').classList.remove('section-hidden');
+  document.getElementById('modeBadge').textContent = isFullAccess ? 'Full access' : 'Worker view';
+
+  // Show/hide full-access elements
+  ['stepCategories','stepRates','stepCash','stepGenerate'].forEach(id => {
+    document.getElementById(id).classList.toggle('section-hidden', !isFullAccess);
+  });
+
+  if (isFullAccess) {
+    document.getElementById('budgetPillsWrap').classList.remove('section-hidden');
+    document.getElementById('selectionActions').style.display = 'flex';
+    document.getElementById('selectedStat').style.display = '';
+  } else {
+    document.getElementById('selectionActions').style.display = 'none';
+    document.getElementById('selectedStat').style.display = 'none';
+  }
+
+  // Init dates
+  const now = new Date();
+  const first = new Date(now.getFullYear(), now.getMonth(), 1);
+  document.getElementById('dateFrom').value = first.toISOString().split('T')[0];
+  document.getElementById('dateTo').value = now.toISOString().split('T')[0];
+
+  // Init budget pills
+  const budgets = isFullAccess ? CONFIG.YNAB_BUDGETS : CONFIG.YNAB_BUDGETS.filter(b => b.workerAccess);
+  budgets.forEach(b => activeBudgets.add(b.id));
+  renderPills();
+
+  // Restore category prefs
+  const savedPrefs = Drive.getCategoryPrefs();
+  if (savedPrefs) activeCategories = new Set(savedPrefs);
+}
+
+// ─── Budget pills ─────────────────────────────────────────────────────────────
+function renderPills() {
+  const budgets = isFullAccess ? CONFIG.YNAB_BUDGETS : CONFIG.YNAB_BUDGETS.filter(b => b.workerAccess);
+  document.getElementById('budgetPills').innerHTML = budgets.map(b => `
+    <div class="pill ${activeBudgets.has(b.id) ? 'active' : ''}" onclick="toggleBudget('${b.id}')">
+      ${b.name}<span class="tag">${b.currency}</span>
+    </div>`).join('');
+}
+
+function toggleBudget(id) {
+  if (activeBudgets.has(id)) activeBudgets.delete(id); else activeBudgets.add(id);
+  renderPills();
+  if (allTransactions.length) renderTable();
+}
+
+// ─── Loading ──────────────────────────────────────────────────────────────────
+function showLoading(msg) { document.getElementById('loadingMsg').textContent = msg||'Loading...'; document.getElementById('loadingOverlay').classList.add('show'); }
+function hideLoading() { document.getElementById('loadingOverlay').classList.remove('show'); }
+
+// ─── Load transactions ────────────────────────────────────────────────────────
+async function loadTransactions() {
+  const token = document.getElementById('token').value.trim();
+  const from = document.getElementById('dateFrom').value;
+  const to = document.getElementById('dateTo').value;
+  const errEl = document.getElementById('connectError');
+  errEl.innerHTML = '';
+  if (!token) { errEl.innerHTML = '<div class="error-msg">Please enter your YNAB token.</div>'; return; }
+  if (!from || !to) { errEl.innerHTML = '<div class="error-msg">Please select a date range.</div>'; return; }
+
+  showLoading('Loading transactions...');
+  allTransactions = []; selectedIds = new Set(); selectedSubIds = new Set();
+
+  const budgets = isFullAccess ? CONFIG.YNAB_BUDGETS : CONFIG.YNAB_BUDGETS.filter(b => b.workerAccess);
+  const errors = [];
+
+  const results = await Promise.all(budgets.filter(b => activeBudgets.has(b.id)).map(async budget => {
+    try {
+      const res = await fetch(`https://api.ynab.com/v1/budgets/${budget.id}/transactions?since_date=${from}`, {
+        headers: { 'Authorization': 'Bearer ' + token }
+      });
+      const data = await res.json();
+      if (!res.ok) { errors.push(`${budget.name}: ${data.error?.detail||'Error'}`); return []; }
+      return (data.data.transactions||[])
+        .filter(tx => tx.date <= to && !tx.deleted && tx.amount < 0)
+        .map(tx => ({ ...tx, budgetName: budget.name, currency: budget.currency }));
+    } catch(e) { errors.push(`${budget.name}: Network error`); return []; }
+  }));
+
+  hideLoading();
+
+  // Sort within each budget by date
+  const byBudget = {};
+  results.flat().forEach(tx => {
+    if (!byBudget[tx.budgetName]) byBudget[tx.budgetName] = [];
+    byBudget[tx.budgetName].push(tx);
+  });
+  Object.values(byBudget).forEach(txs => txs.sort((a,b) => a.date.localeCompare(b.date)));
+
+  // Keep budget order from CONFIG
+  const orderedBudgets = budgets.filter(b => activeBudgets.has(b.id));
+  allTransactions = orderedBudgets.flatMap(b => byBudget[b.name] || []);
+
+  if (errors.length) errEl.innerHTML = `<div class="error-msg">${errors.join(', ')}</div>`;
+
+  // Build category list for filter
+  if (isFullAccess) {
+    const cats = new Set();
+    allTransactions.forEach(tx => {
+      if (tx.category_name) cats.add(tx.category_name);
+      if (tx.subtransactions) tx.subtransactions.forEach(s => { if (s.category_name) cats.add(s.category_name); });
+    });
+    allCategories = [...cats].sort();
+    renderCategoryFilter();
+    document.getElementById('stepCategories').classList.remove('section-hidden');
+  }
+
+  document.getElementById('stepSelect').classList.remove('section-hidden');
+  renderTable();
+}
+
+// ─── Category filter ──────────────────────────────────────────────────────────
+function renderCategoryFilter() {
+  const savedPrefs = Drive.getCategoryPrefs();
+  document.getElementById('catFilterGrid').innerHTML = allCategories.map(cat => {
+    const checked = savedPrefs ? savedPrefs.includes(cat) : true;
+    return `<label class="cat-check">
+      <input type="checkbox" value="${cat}" ${checked ? 'checked' : ''} onchange="updateActiveCategories()"/>
+      ${cat}
+    </label>`;
+  }).join('');
+  updateActiveCategories();
+}
+
+function updateActiveCategories() {
+  const checked = [...document.querySelectorAll('#catFilterGrid input:checked')].map(i => i.value);
+  activeCategories = new Set(checked);
+}
+
+function selectAllCats() {
+  document.querySelectorAll('#catFilterGrid input').forEach(i => i.checked = true);
+  updateActiveCategories();
+}
+
+function clearAllCats() {
+  document.querySelectorAll('#catFilterGrid input').forEach(i => i.checked = false);
+  updateActiveCategories();
+}
+
+async function applyCategories() {
+  await Drive.saveCategoryPrefs([...activeCategories]);
+  renderTable();
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+function toGBP(amount, currency) {
+  const rEUR = parseFloat(document.getElementById('rateEUR')?.value) || 1;
+  const rUSD = parseFloat(document.getElementById('rateUSD')?.value) || 1;
+  if (currency === 'EUR') return amount * rEUR;
+  if (currency === 'USD') return amount * rUSD;
+  return amount;
+}
+function sym(c) { return c==='EUR'?'€':c==='USD'?'$':'£'; }
+
+function getFilteredTxs() {
+  return allTransactions.filter(tx => {
+    if (!activeBudgets.has(CONFIG.YNAB_BUDGETS.find(b=>b.name===tx.budgetName)?.id)) return false;
+    if (activeCategories && tx.subtransactions?.length) {
+      return tx.subtransactions.some(s => activeCategories.has(s.category_name));
+    }
+    if (activeCategories && !tx.subtransactions?.length) {
+      return activeCategories.has(tx.category_name);
+    }
+    return true;
+  });
+}
+
+// ─── Render table ─────────────────────────────────────────────────────────────
+function renderTable() {
+  const tbody = document.getElementById('txBody');
+  const filtered = getFilteredTxs();
+  document.getElementById('txCount').textContent = filtered.length;
+  updateSummary();
+  if (!filtered.length) {
+    tbody.innerHTML = `<tr><td colspan="7" class="empty">No transactions found. Check your date range and category filter.</td></tr>`;
+    return;
+  }
+
+  let html = '';
+  let lastBudget = null;
+
+  filtered.forEach((tx, i) => {
+    // Budget group header
+    if (isFullAccess && tx.budgetName !== lastBudget) {
+      lastBudget = tx.budgetName;
+      html += `<tr class="budget-header"><td colspan="7">${tx.budgetName}</td></tr>`;
+    }
+
+    const isSplit = tx.subtransactions?.length > 0;
+    const isSelected = selectedIds.has(tx.id);
+    const hasReceipt = !!(Drive.state.receipts[tx.id]);
+    const isReported = Drive.isReported(tx.id);
+    const amount = Math.abs(tx.amount/1000);
+    const s = sym(tx.currency);
+
+    if (isSplit) {
+      html += `<tr class="split-parent${isReported?' reported':''}">
+        <td class="col-check"></td>
+        <td class="col-date">${tx.date}</td>
+        <td class="col-payee"><strong>${tx.payee_name||'—'}</strong><span class="badge badge-split">split</span>${isReported?`<span class="badge badge-reported">reported</span>`:''}</td>
+        <td class="col-cat" style="font-style:italic;color:var(--text-3);font-size:11px;">select lines</td>
+        <td style="font-size:12px;color:var(--text-3);">${tx.memo||''}</td>
+        <td class="col-amount">${s}${amount.toFixed(2)}${tx.currency!=='GBP'?`<span class="badge badge-curr">${tx.currency}</span>`:''}</td>
+        <td class="col-receipt"><span onclick="openReceiptModal('${tx.id}','${(tx.payee_name||'').replace(/'/g,"\\'")}',${hasReceipt})" style="cursor:pointer;font-size:18px;" title="${hasReceipt?'View/change':'Attach'} receipt">${hasReceipt?'🧾':'<span style="color:var(--text-3);font-size:20px;">+</span>'}</span></td>
+      </tr>`;
+
+      tx.subtransactions.forEach((sub, si) => {
+        if (activeCategories && !activeCategories.has(sub.category_name)) return;
+        const subKey = `${tx.id}::${sub.id}`;
+        const subSel = selectedSubIds.has(subKey);
+        const subAmt = Math.abs(sub.amount/1000);
+        const isLast = si === tx.subtransactions.length-1;
+        html += `<tr class="split-row${subSel?' split-selected':''}${isLast?' split-last':''}" onclick="${isFullAccess?`toggleSub('${tx.id}','${sub.id}')`:''}" style="${isFullAccess?'cursor:pointer;':''}">
+          <td class="col-check">${isFullAccess?`<input type="checkbox" ${subSel?'checked':''} onclick="event.stopPropagation();toggleSub('${tx.id}','${sub.id}')"/>`:''}</td>
+          <td class="col-date"></td>
+          <td class="col-payee split-indent"><span class="split-arrow">↳</span>${sub.category_name||sub.payee_name||'Split'}</td>
+          <td class="col-cat">${sub.category_name||'—'}</td>
+          <td style="font-size:12px;">${sub.memo||''}</td>
+          <td class="col-amount">${s}${subAmt.toFixed(2)}</td>
+          <td></td>
+        </tr>`;
+      });
+
+    } else {
+      html += `<tr class="${isSelected?'selected':''}${isReported?' reported':''}" onclick="${isFullAccess?`toggleTx('${tx.id}')`:''}" style="${isFullAccess?'cursor:pointer;':''}">
+        <td class="col-check">${isFullAccess?`<input type="checkbox" ${isSelected?'checked':''} onclick="event.stopPropagation();toggleTx('${tx.id}')"/>`:''}</td>
+        <td class="col-date">${tx.date}</td>
+        <td class="col-payee">${tx.payee_name||'—'}${isReported?`<span class="badge badge-reported">${Drive.getReportedPeriod(tx.id)}</span>`:''}</td>
+        <td class="col-cat">${tx.category_name||'—'}</td>
+        <td style="font-size:12px;">${tx.memo||''}</td>
+        <td class="col-amount">${s}${amount.toFixed(2)}${tx.currency!=='GBP'?`<span class="badge badge-curr">${tx.currency}</span>`:''}</td>
+        <td class="col-receipt"><span onclick="event.stopPropagation();openReceiptModal('${tx.id}','${(tx.payee_name||'').replace(/'/g,"\\'")}',${hasReceipt})" style="cursor:pointer;font-size:18px;" title="${hasReceipt?'View/change':'Attach'} receipt">${hasReceipt?'🧾':'<span style="color:var(--text-3);font-size:20px;">+</span>'}</span></td>
+      </tr>`;
+    }
+  });
+
+  tbody.innerHTML = html;
+}
+
+function toggleTx(id) {
+  if (selectedIds.has(id)) selectedIds.delete(id); else selectedIds.add(id);
+  updateSummary(); renderTable();
+}
+
+function toggleSub(txId, subId) {
+  const k = `${txId}::${subId}`;
+  if (selectedSubIds.has(k)) selectedSubIds.delete(k); else selectedSubIds.add(k);
+  updateSummary(); renderTable();
+}
+
+function selectAll() {
+  getFilteredTxs().forEach(tx => {
+    if (tx.subtransactions?.length) tx.subtransactions.forEach(s => selectedSubIds.add(`${tx.id}::${s.id}`));
+    else selectedIds.add(tx.id);
+  });
+  updateSummary(); renderTable();
+}
+
+function clearAll() { selectedIds.clear(); selectedSubIds.clear(); updateSummary(); renderTable(); }
+
+function updateSummary() {
+  if (!isFullAccess) return;
+  const filtered = getFilteredTxs();
+  const regularSel = filtered.filter(tx => !tx.subtransactions?.length && selectedIds.has(tx.id));
+  const splitSel = filtered.filter(tx => tx.subtransactions?.length && tx.subtransactions.some(s => selectedSubIds.has(`${tx.id}::${s.id}`)));
+  const count = regularSel.length + splitSel.reduce((n,tx) => n + tx.subtransactions.filter(s => selectedSubIds.has(`${tx.id}::${s.id}`)).length, 0);
+  let total = regularSel.reduce((s,tx) => s + toGBP(Math.abs(tx.amount/1000), tx.currency), 0);
+  splitSel.forEach(tx => tx.subtransactions.filter(s => selectedSubIds.has(`${tx.id}::${s.id}`)).forEach(s => { total += toGBP(Math.abs(s.amount/1000), tx.currency); }));
+  document.getElementById('selectedCount').textContent = count;
+  document.getElementById('selectedTotal').textContent = '£' + total.toFixed(2);
+}
+
+// ─── Receipt modal ────────────────────────────────────────────────────────────
+function openReceiptModal(txId, payee, hasExisting) {
+  modalTxId = txId; modalPendingDataUrl = null; modalPendingFilename = null;
+  document.getElementById('modalTitle').textContent = 'Receipt — ' + payee;
+  document.getElementById('modalSaveBtn').disabled = true;
+  document.getElementById('modalPreview').style.display = 'none';
+  document.getElementById('modalFileInput').value = '';
+  document.getElementById('modalRemoveBtn').style.display = hasExisting ? 'inline-block' : 'none';
+  if (hasExisting) {
+    Drive.getReceiptDataUrl(txId).then(url => {
+      if (url) showModalPreview(url, Drive.state.receipts[txId]?.filename||'receipt');
+    });
+  }
+  document.getElementById('receiptModal').classList.add('show');
+}
+
+function closeReceiptModal() {
+  document.getElementById('receiptModal').classList.remove('show');
+  modalTxId = null; modalPendingDataUrl = null; modalPendingFilename = null;
+}
+
+function showModalPreview(dataUrl, filename) {
+  document.getElementById('modalPreviewImg').src = dataUrl;
+  document.getElementById('modalPreviewName').textContent = filename;
+  document.getElementById('modalPreview').style.display = 'block';
+}
+
+function handleModalFile(file) {
+  if (!file || !file.type.startsWith('image/')) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    modalPendingDataUrl = e.target.result;
+    modalPendingFilename = file.name;
+    showModalPreview(e.target.result, file.name);
+    document.getElementById('modalSaveBtn').disabled = false;
+  };
+  reader.readAsDataURL(file);
+}
+
+async function saveModalReceipt() {
+  if (!modalTxId || !modalPendingDataUrl) return;
+  showLoading('Saving receipt to Drive...');
+  try {
+    await Drive.uploadReceipt(modalTxId, modalPendingDataUrl, modalPendingFilename);
+    hideLoading();
+    closeReceiptModal();
+    renderTable();
+  } catch(e) {
+    hideLoading();
+    alert('Error saving receipt: ' + e.message);
+  }
+}
+
+async function removeCurrentReceipt() {
+  if (!modalTxId) return;
+  showLoading('Removing receipt...');
+  await Drive.deleteReceipt(modalTxId);
+  hideLoading();
+  closeReceiptModal();
+  renderTable();
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const fileInput = document.getElementById('modalFileInput');
+  const dropZone = document.getElementById('dropZone');
+  fileInput.addEventListener('change', () => { if (fileInput.files[0]) handleModalFile(fileInput.files[0]); });
+  dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+  dropZone.addEventListener('drop', e => { e.preventDefault(); dropZone.classList.remove('drag-over'); if (e.dataTransfer.files[0]) handleModalFile(e.dataTransfer.files[0]); });
+  document.getElementById('receiptModal').addEventListener('click', e => { if (e.target===document.getElementById('receiptModal')) closeReceiptModal(); });
+  document.addEventListener('paste', e => {
+    if (!document.getElementById('receiptModal').classList.contains('show')) return;
+    for (const item of e.clipboardData?.items||[]) {
+      if (item.type.startsWith('image/')) { handleModalFile(item.getAsFile()); break; }
+    }
+  });
+});
+
+// ─── Cash transactions ────────────────────────────────────────────────────────
+function addCashTransaction() {
+  const date = document.getElementById('cashDate').value;
+  const payee = document.getElementById('cashPayee').value.trim();
+  const cat = document.getElementById('cashCat').value.trim();
+  const memo = document.getElementById('cashMemo').value.trim();
+  const amount = parseFloat(document.getElementById('cashAmount').value);
+  if (!date||!payee||isNaN(amount)) { alert('Date, payee and amount are required.'); return; }
+  const id = 'cash-'+(++cashIdCounter);
+  const tx = { id, date, payee_name: payee, category_name: cat, memo, amount: -amount*1000, currency:'GBP', budgetName:'Cash', isCash:true };
+  cashTransactions.push(tx);
+  allTransactions = [...allTransactions.filter(t=>!t.isCash), ...cashTransactions];
+  selectedIds.add(id);
+  renderCashList(); renderTable();
+  ['cashPayee','cashCat','cashMemo','cashAmount'].forEach(f => document.getElementById(f).value='');
+}
+
+function removeCash(id) {
+  cashTransactions = cashTransactions.filter(c=>c.id!==id);
+  allTransactions = allTransactions.filter(t=>t.id!==id);
+  selectedIds.delete(id);
+  Drive.deleteReceipt(id);
+  renderCashList(); renderTable();
+}
+
+function renderCashList() {
+  const el = document.getElementById('cashList');
+  el.innerHTML = cashTransactions.map(c => `
+    <div class="cash-item">
+      <span class="mono">${c.date}</span>
+      <span>${c.payee_name}</span>
+      <span style="color:var(--text-2)">${c.category_name||'—'}</span>
+      <span style="color:var(--text-2)">${c.memo||''}</span>
+      <span class="mono">£${Math.abs(c.amount/1000).toFixed(2)}</span>
+      <span style="font-size:11px;color:var(--text-3)">${Drive.state.receipts[c.id]?'🧾':'No receipt'}</span>
+      <button onclick="openReceiptModal('${c.id}','${c.payee_name}',${!!Drive.state.receipts[c.id]})">📎 Receipt</button>
+      <button class="danger" onclick="removeCash('${c.id}')">Remove</button>
+    </div>`).join('');
+}
+
+// ─── Export CSV ───────────────────────────────────────────────────────────────
+function exportCSV() {
+  const period = document.getElementById('reportPeriod').value || 'Report';
+  const rows = buildReportRows();
+  if (!rows.length) { document.getElementById('generateMsg').innerHTML = '<div class="error-msg">No transactions selected.</div>'; return; }
+
+  let csv = 'Budget,Date,Payee,Category,Memo,Outflow (GBP)\n';
+  let lastBudget = '';
+  rows.forEach(r => {
+    const budget = r.budget || lastBudget;
+    if (r.budget) lastBudget = r.budget;
+    csv += [budget, r.date, r.payee, r.category, r.memo, r.amount].map(v => `"${(v||'').replace(/"/g,'""')}"`).join(',') + '\n';
+  });
+
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `Izzy-Report-${period.replace(/\s+/g,'-')}.csv`;
+  a.click();
+
+  // Mark as reported
+  const txIds = [...selectedIds, ...[...selectedSubIds].map(k => k.split('::')[0])];
+  Drive.markReported([...new Set(txIds)], period).then(() => renderTable());
+  document.getElementById('generateMsg').innerHTML = `<div class="success-msg">CSV downloaded. Transactions marked as reported for "${period}".</div>`;
+}
+
+// ─── Generate receipt Google Doc ──────────────────────────────────────────────
+async function generateReceiptDoc() {
+  const period = document.getElementById('reportPeriod').value || 'Report';
+  const msgEl = document.getElementById('generateMsg');
+  msgEl.innerHTML = '';
+
+  // Collect selected txs that have receipts
+  const filtered = getFilteredTxs();
+  const receiptTxIds = [];
+
+  filtered.forEach(tx => {
+    const isSplit = tx.subtransactions?.length > 0;
+    if (isSplit) {
+      const hasSel = tx.subtransactions.some(s => selectedSubIds.has(`${tx.id}::${s.id}`));
+      if (hasSel && Drive.state.receipts[tx.id]) receiptTxIds.push(tx.id);
+    } else {
+      if (selectedIds.has(tx.id) && Drive.state.receipts[tx.id]) receiptTxIds.push(tx.id);
+    }
+  });
+  cashTransactions.forEach(c => { if (selectedIds.has(c.id) && Drive.state.receipts[c.id]) receiptTxIds.push(c.id); });
+
+  if (!receiptTxIds.length) { msgEl.innerHTML = '<div class="error-msg">No receipts attached to selected transactions.</div>'; return; }
+
+  showLoading('Loading receipts from Drive...');
+
+  // Load all receipt images
+  const annexEntries = [];
+  let num = 1;
+  for (const txId of receiptTxIds) {
+    const dataUrl = await Drive.getReceiptDataUrl(txId);
+    if (!dataUrl) continue;
+    const tx = allTransactions.find(t=>t.id===txId) || cashTransactions.find(t=>t.id===txId);
+    annexEntries.push({ num: num++, payee: tx?.payee_name||'Cash', date: tx?.date||'', dataUrl });
+  }
+
+  if (!annexEntries.length) { hideLoading(); msgEl.innerHTML = '<div class="error-msg">Could not load receipt images from Drive.</div>'; return; }
+
+  showLoading('Creating Google Doc in your Drive...');
+
+  const docHtml = buildAnnexHtml(period, annexEntries);
+  try {
+    const result = await Drive.createGoogleDoc(`Izzy Receipts — ${period}`, docHtml);
+    hideLoading();
+    msgEl.innerHTML = `<div class="success-msg">Google Doc created! <a href="${result.webViewLink}" target="_blank" style="color:var(--accent);font-weight:500;">Open in Drive →</a></div>`;
+  } catch(e) {
+    hideLoading();
+    msgEl.innerHTML = `<div class="error-msg">Error creating Doc: ${e.message}</div>`;
+  }
+}
+
+// ─── Build report rows ────────────────────────────────────────────────────────
+function buildReportRows() {
+  const rows = [];
+  const filtered = getFilteredTxs();
+  let lastBudget = null;
+
+  filtered.forEach(tx => {
+    const isSplit = tx.subtransactions?.length > 0;
+    const s = sym(tx.currency);
+    const budgetLabel = tx.budgetName !== lastBudget ? tx.budgetName : '';
+    if (tx.budgetName !== lastBudget) lastBudget = tx.budgetName;
+
+    if (isSplit) {
+      const selSubs = tx.subtransactions.filter(sub => selectedSubIds.has(`${tx.id}::${sub.id}`));
+      if (!selSubs.length) return;
+      selSubs.forEach((sub, i) => {
+        const amt = toGBP(Math.abs(sub.amount/1000), tx.currency);
+        rows.push({
+          budget: i===0 ? budgetLabel : '',
+          date: i===0 ? tx.date : '',
+          payee: i===0 ? (tx.payee_name||'—') : '  ↳',
+          category: sub.category_name||'—',
+          memo: sub.memo||(i===0?tx.memo||'':''),
+          amount: '£'+amt.toFixed(2)
+        });
+      });
+    } else if (selectedIds.has(tx.id)) {
+      const amt = toGBP(Math.abs(tx.amount/1000), tx.currency);
+      const orig = Math.abs(tx.amount/1000);
+      rows.push({
+        budget: budgetLabel,
+        date: tx.date,
+        payee: tx.payee_name||'—',
+        category: tx.category_name||'—',
+        memo: tx.memo||'',
+        amount: tx.currency!=='GBP' ? `£${amt.toFixed(2)} (${s}${orig.toFixed(2)})` : `£${amt.toFixed(2)}`
+      });
+    }
+  });
+
+  // Cash
+  cashTransactions.filter(c=>selectedIds.has(c.id)).forEach(c => {
+    rows.push({ budget:'Cash', date:c.date, payee:c.payee_name, category:c.category_name||'—', memo:c.memo||'', amount:`£${Math.abs(c.amount/1000).toFixed(2)}` });
+  });
+
+  return rows;
+}
+
+// ─── Annex HTML ───────────────────────────────────────────────────────────────
+function buildAnnexHtml(period, entries) {
+  const pages = [];
+  for (let i=0; i<entries.length; i+=4) pages.push(entries.slice(i,i+4));
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"/>
+<style>
+  body{font-family:sans-serif;font-size:11pt;color:#1a1916;margin:0;}
+  h1{font-size:16pt;font-weight:600;margin-bottom:4px;}
+  .sub{font-size:10pt;color:#6b6860;margin-bottom:20px;}
+  .page{page-break-before:always;padding:10mm;}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
+  .cell{border:1px solid #e2e0d8;border-radius:6px;padding:10px;}
+  .label{font-size:9pt;font-weight:600;color:#6b6860;margin-bottom:6px;font-family:monospace;}
+  img{width:100%;max-height:200px;object-fit:contain;}
+</style></head><body>
+<div style="padding:10mm 10mm 0;">
+  <h1>Receipt Annex — ${period}</h1>
+  <p class="sub">Generated ${new Date().toLocaleDateString('en-GB',{day:'numeric',month:'long',year:'numeric'})}</p>
+</div>
+${pages.map((page,pi) => `<div class="${pi>0?'page':''}"><div class="grid">
+  ${page.map(e=>`<div class="cell"><div class="label">#${e.num} — ${e.payee} — ${e.date}</div><img src="${e.dataUrl}"/></div>`).join('')}
+</div></div>`).join('')}
+</body></html>`;
+}
+</script>
+
+<!-- Google APIs -->
+<script src="https://apis.google.com/js/api.js" onload="onGapiLoad()"></script>
+<script src="https://accounts.google.com/gsi/client" onload="onGisLoad()"></script>
+</body>
+</html>
