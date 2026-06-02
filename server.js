@@ -77,7 +77,10 @@ app.get('/auth/callback', async (req, res) => {
     }
     res.redirect('/auth/setup-done');
   } catch (e) {
-    res.redirect('/?setup_error=' + encodeURIComponent('OAuth failed: ' + e.message));
+    const googleError = e.response?.data;
+    console.error('OAuth callback failed:', JSON.stringify(googleError || e.message));
+    const detail = googleError?.error_description || googleError?.error || e.message;
+    res.redirect('/?setup_error=' + encodeURIComponent(detail));
   }
 });
 
@@ -116,6 +119,20 @@ app.get('/api/auth/status', (req, res) => {
   res.json({ configured: googleReady });
 });
 
+// ─── Debug endpoint (safe — never exposes secrets) ────────────────────────────
+app.get('/auth/debug', (req, res) => {
+  const cid = process.env.GOOGLE_CLIENT_ID;
+  const cs  = process.env.GOOGLE_CLIENT_SECRET;
+  const ru  = process.env.GOOGLE_REDIRECT_URI;
+  res.json({
+    GOOGLE_CLIENT_ID:     cid ? cid.slice(0, 24) + '…' : 'NOT SET',
+    GOOGLE_CLIENT_SECRET: cs  ? `SET (length ${cs.length}, starts "${cs.slice(0,4)}")` : 'NOT SET',
+    GOOGLE_REDIRECT_URI:  ru  || 'NOT SET',
+    GOOGLE_REFRESH_TOKEN: process.env.GOOGLE_REFRESH_TOKEN ? 'SET' : 'not set',
+    googleReady,
+  });
+});
+
 // ─── Google API proxy ──────────────────────────────────────────────────────────
 async function requireGoogleAuth(req, res, next) {
   if (!googleReady) return res.status(401).json({ error: 'Google Drive not configured. Admin must sign in first.' });
@@ -152,6 +169,12 @@ app.get('*', (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Izzy Report running on http://localhost:${PORT}`);
-  if (!googleReady) console.log('  ⚠  Google not configured — visit /auth/login to connect.');
+  console.log(`Izzy Report running on port ${PORT}`);
+  const cid = process.env.GOOGLE_CLIENT_ID;
+  const cs  = process.env.GOOGLE_CLIENT_SECRET;
+  const ru  = process.env.GOOGLE_REDIRECT_URI;
+  console.log(`  CLIENT_ID:     ${cid ? cid.slice(0, 24) + '…' : 'NOT SET ⚠'}`);
+  console.log(`  CLIENT_SECRET: ${cs  ? `SET (length ${cs.length})` : 'NOT SET ⚠'}`);
+  console.log(`  REDIRECT_URI:  ${ru  || 'NOT SET ⚠'}`);
+  if (!googleReady) console.log('  Google Drive not configured — visit /auth/login to connect.');
 });
