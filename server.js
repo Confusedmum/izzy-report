@@ -7,6 +7,7 @@ const path = require('path');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const FOLDER_NAME = 'Izzy Report Tool';
+const TIMEOUT_MS = 30_000;
 
 // ─── OAuth client ──────────────────────────────────────────────────────────────
 function makeOAuthClient() {
@@ -25,78 +26,118 @@ if (process.env.GOOGLE_REFRESH_TOKEN) {
   googleReady = true;
 }
 
-// googleapis Drive client — oauthClient handles token refresh automatically
-const driveApi = google.drive({ version: 'v3', auth: oauthClient });
+// Get a fresh access token — oauthClient handles refresh automatically
+async function getToken() {
+  const { token } = await oauthClient.getAccessToken();
+  if (!token) throw new Error('Could not get access token. Check GOOGLE_REFRESH_TOKEN env var.');
+  return token;
+}
+
+// Drive fetch helper — uses fetch() with a timeout, same as the confirmed-working
+// /api/drive/test endpoint. All Drive API calls go through here.
+async function driveFetch(url, opts = {}) {
+  const token = await getToken();
+  const res = await fetch(url, {
+    ...opts,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      ...opts.headers,
+    },
+    signal: AbortSignal.timeout(TIMEOUT_MS),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => res.status.toString());
+    throw new Error(`Drive API ${res.status}: ${text}`);
+  }
+  return res;
+}
+
+async function driveFetchJson(url, opts = {}) {
+  const res = await driveFetch(url, opts);
+  return res.json();
+}
 
 // ─── Server-side Drive state ────────────────────────────────────────────────────
-let driveFolderId  = null;
+let driveFolderId    = null;
 let driveStateFileId = null;
-let driveAppState  = { reportedTxIds: {}, categoryPrefs: null, receipts: {} };
+let driveAppState    = { reportedTxIds: {}, categoryPrefs: null, receipts: {} };
 let driveInitPromise = null;
 
 async function getDriveFolder() {
   if (driveFolderId) return driveFolderId;
-  const res = await driveApi.files.list({
-    q: `name='${FOLDER_NAME}' and mimeType='application/vnd.google-apps.folder' and trashed=false`,
-    fields: 'files(id)',
-  });
-  if (res.data.files.length > 0) {
-    driveFolderId = res.data.files[0].id;
+
+  const q = encodeURIComponent(
+    `name='${FOLDER_NAME}' and mimeType='application/vnd.google-apps.folder' and trashed=false`
+  );
+  const data = await driveFetchJson(
+    `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id)`
+  );
+
+  if (data.files?.length > 0) {
+    driveFolderId = data.files[0].id;
+    console.log('Found Drive folder:', driveFolderId);
   } else {
-    const created = await driveApi.files.create({
-      requestBody: { name: FOLDER_NAME, mimeType: 'application/vnd.google-apps.folder' },
-      fields: 'id',
+    const created = await driveFetchJson('https://www.googleapis.com/drive/v3/files?fields=id', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: FOLDER_NAME, mimeType: 'application/vnd.google-apps.folder' }),
     });
-    driveFolderId = created.data.id;
+    driveFolderId = created.id;
+    console.log('Created Drive folder:', driveFolderId);
   }
   return driveFolderId;
 }
 
 async function loadState() {
   const folderId = await getDriveFolder();
-  const res = await driveApi.files.list({
-    q: `name='state.json' and '${folderId}' in parents and trashed=false`,
-    fields: 'files(id)',
-  });
-  if (res.data.files.length === 0) { driveStateFileId = null; return; }
-  driveStateFileId = res.data.files[0].id;
-  const content = await driveApi.files.get(
-    { fileId: driveStateFileId, alt: 'media' },
-    { responseType: 'json' }
+  const q = encodeURIComponent(`name='state.json' and '${folderId}' in parents and trashed=false`);
+  const data = await driveFetchJson(
+    `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id)`
   );
-  driveAppState = {
-    reportedTxIds: {},
-    categoryPrefs: null,
-    receipts: {},
-    ...content.data,
-  };
+
+  if (!data.files?.length) { driveStateFileId = null; return; }
+
+  driveStateFileId = data.files[0].id;
+  const res = await driveFetch(
+    `https://www.googleapis.com/drive/v3/files/${driveStateFileId}?alt=media`
+  );
+  const loaded = await res.json().catch(() => ({}));
+  driveAppState = { reportedTxIds: {}, categoryPrefs: null, receipts: {}, ...loaded };
+  console.log('Loaded state.json, receipts:', Object.keys(driveAppState.receipts || {}).length);
 }
 
 async function saveState() {
   const folderId = await getDriveFolder();
   const body = JSON.stringify(driveAppState);
+
   if (driveStateFileId) {
-    await driveApi.files.update({
-      fileId: driveStateFileId,
-      media: { mimeType: 'application/json', body },
-    });
+    await driveFetch(
+      `https://www.googleapis.com/upload/drive/v3/files/${driveStateFileId}?uploadType=media`,
+      { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body }
+    );
   } else {
-    const created = await driveApi.files.create({
-      requestBody: { name: 'state.json', parents: [folderId] },
-      media: { mimeType: 'application/json', body },
-      fields: 'id',
-    });
-    driveStateFileId = created.data.id;
+    const form = new FormData();
+    form.append('metadata', new Blob(
+      [JSON.stringify({ name: 'state.json', parents: [folderId] })],
+      { type: 'application/json' }
+    ));
+    form.append('file', new Blob([body], { type: 'application/json' }));
+    const created = await driveFetchJson(
+      'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id',
+      { method: 'POST', body: form }
+    );
+    driveStateFileId = created.id;
+    console.log('Created state.json:', driveStateFileId);
   }
 }
 
-// Called by every Drive endpoint — initialises folder + state once, then caches
+// Initialize once; reset on error so the next request retries
 async function ensureDriveReady() {
   if (!driveInitPromise) {
     driveInitPromise = getDriveFolder()
       .then(() => loadState())
       .catch(err => {
-        driveInitPromise = null; // allow retry on next request
+        driveInitPromise = null;
         throw err;
       });
   }
@@ -115,7 +156,6 @@ app.use(session({
   },
 }));
 
-// JSON body parsing for Drive API endpoints (15 MB covers receipt uploads)
 app.use(express.json({ limit: '15mb' }));
 
 // ─── Auth routes ───────────────────────────────────────────────────────────────
@@ -134,7 +174,7 @@ app.get('/auth/callback', async (req, res) => {
     const { tokens } = await client.getToken(code);
     oauthClient.setCredentials(tokens);
     googleReady = true;
-    driveInitPromise = null; // reset so the new credentials are used
+    driveInitPromise = null;
     console.log('OAuth success. refresh_token present:', !!tokens.refresh_token);
     res.send(buildSetupDonePage(tokens.refresh_token || ''));
   } catch (e) {
@@ -163,20 +203,13 @@ function buildSetupDonePage(rt) {
   .token-box { position: relative; margin: 0.5rem 0; }
   textarea { width: 100%; font-family: monospace; font-size: 12px; background: #f5f4f0; border: 1px solid #ccc; border-radius: 6px; padding: 8px; resize: none; }
   .copy-btn { position: absolute; top: 6px; right: 6px; font-size: 12px; padding: 3px 10px; border: 1px solid #ccc; border-radius: 4px; background: white; cursor: pointer; }
-  .copy-btn:hover { background: #f0f0f0; }
   .warn-box { background: #fef2f2; border: 1px solid #fca5a5; border-radius: 8px; padding: 1rem; margin: 1rem 0; font-size: 13px; }
   .btn { display: inline-block; margin-top: 1.25rem; padding: 10px 20px; background: #2d5a3d; color: white; border-radius: 8px; text-decoration: none; font-size: 14px; font-weight: 500; }
-  .btn:hover { background: #1d3d29; }
 </style>
 </head><body><div class="card">
 <h2><span class="green">✓</span> Google Drive connected</h2>
 <p style="margin-top:0.5rem;">${noToken ? 'Sign-in worked but no refresh token was returned — see below.' : 'Sign-in worked. Save the refresh token so the app stays connected after restarts.'}</p>
-${noToken ? `
-<div class="warn-box">
-  <strong>No refresh token returned.</strong> This happens when the app was previously authorised.
-  Go to <a href="https://myaccount.google.com/permissions" target="_blank">myaccount.google.com/permissions</a>,
-  remove <strong>Izzy Report Tool</strong>, then <a href="/auth/login">sign in again</a>.
-</div>` : `
+${noToken ? `<div class="warn-box"><strong>No refresh token returned.</strong> Go to <a href="https://myaccount.google.com/permissions" target="_blank">myaccount.google.com/permissions</a>, remove <strong>Izzy Report Tool</strong>, then <a href="/auth/login">sign in again</a>.</div>` : `
 <div class="step">
   <h3>Do this now — before navigating away</h3>
   <ol>
@@ -196,7 +229,7 @@ ${noToken ? `
 
 app.get('/auth/logout', (req, res) => res.redirect('/'));
 
-// ─── Status + debug endpoints ──────────────────────────────────────────────────
+// ─── Status + debug ────────────────────────────────────────────────────────────
 app.get('/api/auth/status', (req, res) => {
   res.json({ configured: googleReady });
 });
@@ -209,12 +242,12 @@ app.get('/auth/debug', (req, res) => {
     GOOGLE_CLIENT_ID:     cid ? cid.slice(0, 24) + '…' : 'NOT SET',
     GOOGLE_CLIENT_SECRET: cs  ? `SET (length ${cs.length}, starts "${cs.slice(0,4)}")` : 'NOT SET',
     GOOGLE_REDIRECT_URI:  ru  || 'NOT SET',
-    GOOGLE_REFRESH_TOKEN: process.env.GOOGLE_REFRESH_TOKEN ? 'SET' : 'not set',
+    GOOGLE_REFRESH_TOKEN: process.env.GOOGLE_REFRESH_TOKEN ? 'SET' : 'NOT SET',
     googleReady,
   });
 });
 
-// ─── Drive API middleware ──────────────────────────────────────────────────────
+// ─── Drive middleware ──────────────────────────────────────────────────────────
 function requireDrive(req, res, next) {
   if (!googleReady) return res.status(401).json({ error: 'Google Drive not configured — admin must sign in first' });
   next();
@@ -222,9 +255,9 @@ function requireDrive(req, res, next) {
 
 // ─── Drive endpoints ───────────────────────────────────────────────────────────
 
-// Initialise: find/create folder, load state, return state to client
 app.get('/api/drive/init', requireDrive, async (req, res) => {
   try {
+    console.log('Drive init request');
     await ensureDriveReady();
     res.json({ state: driveAppState });
   } catch (e) {
@@ -233,7 +266,6 @@ app.get('/api/drive/init', requireDrive, async (req, res) => {
   }
 });
 
-// Save full state object
 app.post('/api/drive/state', requireDrive, async (req, res) => {
   try {
     await ensureDriveReady();
@@ -246,7 +278,6 @@ app.post('/api/drive/state', requireDrive, async (req, res) => {
   }
 });
 
-// Upload or replace a receipt
 app.post('/api/drive/receipt/:txId', requireDrive, async (req, res) => {
   try {
     await ensureDriveReady();
@@ -257,20 +288,27 @@ app.post('/api/drive/receipt/:txId', requireDrive, async (req, res) => {
     const mime = header.split(':')[1].split(';')[0];
     const buf  = Buffer.from(b64, 'base64');
     const folderId = await getDriveFolder();
+    const existingId = driveAppState.receipts?.[txId]?.fileId;
 
-    const existingFileId = driveAppState.receipts?.[txId]?.fileId;
     let fileId;
-
-    if (existingFileId) {
-      await driveApi.files.update({ fileId: existingFileId, media: { mimeType: mime, body: buf } });
-      fileId = existingFileId;
+    if (existingId) {
+      await driveFetch(
+        `https://www.googleapis.com/upload/drive/v3/files/${existingId}?uploadType=media`,
+        { method: 'PATCH', headers: { 'Content-Type': mime }, body: buf }
+      );
+      fileId = existingId;
     } else {
-      const created = await driveApi.files.create({
-        requestBody: { name: `receipt_${txId}_${filename}`, parents: [folderId] },
-        media: { mimeType: mime, body: buf },
-        fields: 'id',
-      });
-      fileId = created.data.id;
+      const form = new FormData();
+      form.append('metadata', new Blob(
+        [JSON.stringify({ name: `receipt_${txId}_${filename}`, parents: [folderId] })],
+        { type: 'application/json' }
+      ));
+      form.append('file', new Blob([buf], { type: mime }));
+      const created = await driveFetchJson(
+        'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id',
+        { method: 'POST', body: form }
+      );
+      fileId = created.id;
     }
 
     if (!driveAppState.receipts) driveAppState.receipts = {};
@@ -283,38 +321,32 @@ app.post('/api/drive/receipt/:txId', requireDrive, async (req, res) => {
   }
 });
 
-// Return a receipt as a base64 data URL
 app.get('/api/drive/receipt/:txId', requireDrive, async (req, res) => {
   try {
     await ensureDriveReady();
     const entry = driveAppState.receipts?.[req.params.txId];
     if (!entry) return res.status(404).json({ error: 'No receipt for this transaction' });
 
-    const stream = await driveApi.files.get(
-      { fileId: entry.fileId, alt: 'media' },
-      { responseType: 'stream' }
+    const fileRes = await driveFetch(
+      `https://www.googleapis.com/drive/v3/files/${entry.fileId}?alt=media`
     );
-    const chunks = [];
-    await new Promise((resolve, reject) => {
-      stream.data.on('data', c => chunks.push(c));
-      stream.data.on('end', resolve);
-      stream.data.on('error', reject);
-    });
+    const buf = Buffer.from(await fileRes.arrayBuffer());
     const mime = entry.mime || 'image/jpeg';
-    res.json({ dataUrl: `data:${mime};base64,${Buffer.concat(chunks).toString('base64')}` });
+    res.json({ dataUrl: `data:${mime};base64,${buf.toString('base64')}` });
   } catch (e) {
     console.error('Receipt get error:', e.message);
     res.status(500).json({ error: e.message });
   }
 });
 
-// Delete a receipt
 app.delete('/api/drive/receipt/:txId', requireDrive, async (req, res) => {
   try {
     await ensureDriveReady();
     const entry = driveAppState.receipts?.[req.params.txId];
     if (entry) {
-      try { await driveApi.files.delete({ fileId: entry.fileId }); } catch (_) {}
+      try {
+        await driveFetch(`https://www.googleapis.com/drive/v3/files/${entry.fileId}`, { method: 'DELETE' });
+      } catch (_) {}
       delete driveAppState.receipts[req.params.txId];
       await saveState();
     }
@@ -325,33 +357,33 @@ app.delete('/api/drive/receipt/:txId', requireDrive, async (req, res) => {
   }
 });
 
-// Create a Google Doc from HTML (receipt annex)
 app.post('/api/drive/doc', requireDrive, async (req, res) => {
   try {
     await ensureDriveReady();
     const { title, htmlContent } = req.body;
     const folderId = await getDriveFolder();
-    const created = await driveApi.files.create({
-      requestBody: {
-        name: title,
-        parents: [folderId],
-        mimeType: 'application/vnd.google-apps.document',
-      },
-      media: { mimeType: 'text/html', body: htmlContent },
-      fields: 'id,webViewLink',
-    });
-    res.json({ webViewLink: created.data.webViewLink });
+    const form = new FormData();
+    form.append('metadata', new Blob(
+      [JSON.stringify({ name: title, parents: [folderId], mimeType: 'application/vnd.google-apps.document' })],
+      { type: 'application/json' }
+    ));
+    form.append('file', new Blob([htmlContent], { type: 'text/html' }));
+    const created = await driveFetchJson(
+      'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,webViewLink',
+      { method: 'POST', body: form }
+    );
+    res.json({ webViewLink: created.webViewLink });
   } catch (e) {
     console.error('Doc creation error:', e.message);
     res.status(500).json({ error: e.message });
   }
 });
 
-// Quick connectivity check
+// Connectivity check — same fetch() approach as everything else
 app.get('/api/drive/test', requireDrive, async (req, res) => {
   try {
-    const r = await driveApi.about.get({ fields: 'user' });
-    res.json({ ok: true, user: r.data.user });
+    const data = await driveFetchJson('https://www.googleapis.com/drive/v3/about?fields=user');
+    res.json({ ok: true, user: data.user });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
