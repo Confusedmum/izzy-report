@@ -2,7 +2,6 @@ require('dotenv').config();
 const express = require('express');
 const session = require('express-session');
 const { google } = require('googleapis');
-const https = require('https');
 const path = require('path');
 
 const app = express();
@@ -180,45 +179,47 @@ async function requireGoogleAuth(req, res, next) {
   }
 }
 
-// Pipe-based proxy using Node's built-in https — avoids http-proxy-middleware
-// hanging issues on Render. app.use() strips /api/google from req.url; app.all() does not.
+// fetch()-based proxy — same approach as /api/drive/test which is confirmed working.
+// app.use() strips /api/google from req.url before this handler runs.
 app.use('/api/google', requireGoogleAuth, (req, res) => {
-  const proxyReq = https.request(
-    {
-      hostname: 'www.googleapis.com',
-      path: req.url,   // already stripped of /api/google by Express
-      method: req.method,
-      headers: {
-        ...req.headers,
-        host: 'www.googleapis.com',
-        authorization: 'Bearer ' + req.googleToken,
-        // Tell Google not to compress — we pipe raw bytes straight to the browser
-        // and stripping content-encoding without decompressing breaks JSON parsing.
-        'accept-encoding': 'identity',
-      },
-      timeout: 30_000,
-    },
-    (proxyRes) => {
-      res.status(proxyRes.statusCode);
-      for (const [k, v] of Object.entries(proxyRes.headers)) {
-        // Skip encoding headers — piping the raw stream handles them directly
-        if (k !== 'content-encoding' && k !== 'transfer-encoding') res.setHeader(k, v);
-      }
-      proxyRes.pipe(res);
+  (async () => {
+    const targetUrl = 'https://www.googleapis.com' + req.url;
+    console.log('Proxy:', req.method, targetUrl.slice(0, 100));
+
+    // Forward headers, stripping hop-by-hop and encoding headers
+    const headers = { ...req.headers };
+    delete headers.host;
+    delete headers.connection;
+    delete headers['accept-encoding']; // prevent compressed responses we can't pipe safely
+    headers.authorization = 'Bearer ' + req.googleToken;
+
+    const fetchInit = { method: req.method, headers };
+
+    // Buffer the request body for writes (POST, PATCH, DELETE, etc.)
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      fetchInit.body = Buffer.concat(chunks);
     }
-  );
 
-  proxyReq.on('timeout', () => {
-    proxyReq.destroy();
-    if (!res.headersSent) res.status(504).json({ error: 'Google API request timed out' });
-  });
+    const googleRes = await fetch(targetUrl, {
+      ...fetchInit,
+      signal: AbortSignal.timeout(30_000),
+    });
 
-  proxyReq.on('error', (err) => {
-    console.error('Google API proxy error:', err.message);
+    res.status(googleRes.status);
+    for (const [k, v] of googleRes.headers.entries()) {
+      if (!['content-encoding', 'transfer-encoding', 'connection'].includes(k)) {
+        res.setHeader(k, v);
+      }
+    }
+
+    const buf = await googleRes.arrayBuffer();
+    res.end(Buffer.from(buf));
+  })().catch(err => {
+    console.error('Google proxy error:', err.message);
     if (!res.headersSent) res.status(502).json({ error: 'Proxy error: ' + err.message });
   });
-
-  req.pipe(proxyReq);
 });
 
 // Quick Drive connectivity test — visit /api/drive/test to verify token works
