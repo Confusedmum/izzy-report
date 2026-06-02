@@ -192,6 +192,9 @@ app.use('/api/google', requireGoogleAuth, (req, res) => {
         ...req.headers,
         host: 'www.googleapis.com',
         authorization: 'Bearer ' + req.googleToken,
+        // Tell Google not to compress — we pipe raw bytes straight to the browser
+        // and stripping content-encoding without decompressing breaks JSON parsing.
+        'accept-encoding': 'identity',
       },
       timeout: 30_000,
     },
