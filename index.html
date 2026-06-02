@@ -330,18 +330,44 @@ function signOut() {
 function checkTokenInUrl() {
   // After Google redirect, token is in the URL hash
   const hash = window.location.hash;
-  if (!hash) return false;
-  const params = new URLSearchParams(hash.substring(1));
-  const token = params.get('access_token');
-  const expiresIn = params.get('expires_in');
-  if (!token) return false;
-  accessToken = token;
-  const expiry = Date.now() + (parseInt(expiresIn) * 1000);
-  sessionStorage.setItem('izzy_token', token);
-  sessionStorage.setItem('izzy_token_expiry', expiry.toString());
-  // Clean up URL
-  window.history.replaceState({}, document.title, window.location.pathname);
-  return true;
+  const search = window.location.search;
+  console.log('izzy: hash=', hash);
+  console.log('izzy: search=', search);
+  console.log('izzy: full url=', window.location.href);
+  
+  // Try hash first (implicit flow)
+  if (hash) {
+    const params = new URLSearchParams(hash.substring(1));
+    const token = params.get('access_token');
+    const expiresIn = params.get('expires_in');
+    console.log('izzy: token from hash=', token ? 'FOUND' : 'not found');
+    if (token) {
+      accessToken = token;
+      const expiry = Date.now() + (parseInt(expiresIn) * 1000);
+      sessionStorage.setItem('izzy_token', token);
+      sessionStorage.setItem('izzy_token_expiry', expiry.toString());
+      window.history.replaceState({}, document.title, window.location.pathname);
+      return true;
+    }
+  }
+  
+  // Try query string (some flows use this)
+  if (search) {
+    const params = new URLSearchParams(search.substring(1));
+    const token = params.get('access_token');
+    console.log('izzy: token from search=', token ? 'FOUND' : 'not found');
+    if (token) {
+      accessToken = token;
+      const expiry = Date.now() + (parseInt(params.get('expires_in') || '3600') * 1000);
+      sessionStorage.setItem('izzy_token', token);
+      sessionStorage.setItem('izzy_token_expiry', expiry.toString());
+      window.history.replaceState({}, document.title, window.location.pathname);
+      return true;
+    }
+  }
+  
+  console.log('izzy: no token found in URL');
+  return false;
 }
 
 function loadSavedToken() {
