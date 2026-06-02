@@ -83,7 +83,7 @@ td { padding: 8px; vertical-align: top; }
 .error-msg { color: var(--danger); background: var(--danger-bg); border-radius: var(--radius); padding: 8px 12px; font-size: 13px; margin-top: 8px; }
 .success-msg { color: #065f46; background: #d1fae5; border-radius: var(--radius); padding: 8px 12px; font-size: 13px; margin-top: 8px; }
 .note { font-size: 12px; color: var(--text-3); margin-top: 6px; }
-.section-hidden { display: none; }
+.section-hidden { display: none !important; }
 .cat-filter-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 6px; max-height: 200px; overflow-y: auto; }
 .cat-check { display: flex; align-items: center; gap: 6px; font-size: 13px; padding: 4px 0; }
 .cat-check input { margin: 0; }
@@ -459,11 +459,18 @@ async function init() {
   try {
     await Drive.init();
     console.log('[Izzy] Drive.init() succeeded — showing PIN screen');
-    setMsg('Connected!', false);
-    await new Promise(r => setTimeout(r, 400));
-    document.getElementById('authScreen').classList.add('section-hidden');
-    document.getElementById('signOutBtn').style.display = 'block';
-    document.getElementById('pinScreen').classList.remove('section-hidden');
+    setMsg('Connected! Loading...', false);
+
+    // Use style.display directly — more reliable than classList across browsers
+    const authEl  = document.getElementById('authScreen');
+    const pinEl   = document.getElementById('pinScreen');
+    const signBtn = document.getElementById('signOutBtn');
+    console.log('[Izzy] authScreen:', !!authEl, 'pinScreen:', !!pinEl);
+
+    if (authEl)  authEl.style.display  = 'none';
+    if (signBtn) signBtn.style.display = 'block';
+    if (pinEl)   pinEl.style.display   = 'flex';
+    console.log('[Izzy] PIN screen display set to flex');
   } catch(e) {
     console.error('[Izzy] Drive.init() failed:', e.name, e.message);
     setMsg('Google Drive connection failed.', false);
