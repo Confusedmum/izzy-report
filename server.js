@@ -2,7 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const session = require('express-session');
 const { google } = require('googleapis');
-const { createProxyMiddleware } = require('http-proxy-middleware');
+const https = require('https');
 const path = require('path');
 
 const app = express();
@@ -33,9 +33,12 @@ let tokenExpiry = 0;
 
 async function getFreshToken() {
   if (cachedToken && tokenExpiry > Date.now() + 60_000) return cachedToken;
-  const { token, expiry_date } = await oauthClient.getAccessToken();
+  const { token } = await oauthClient.getAccessToken();
+  if (!token) throw new Error('No access token returned — refresh token may be invalid');
   cachedToken = token;
-  tokenExpiry = expiry_date ?? Date.now() + 55 * 60 * 1000;
+  // expiry_date lives on oauthClient.credentials after the call
+  tokenExpiry = oauthClient.credentials.expiry_date ?? Date.now() + 55 * 60 * 1000;
+  console.log('Access token refreshed, expires', new Date(tokenExpiry).toISOString());
   return token;
 }
 
@@ -172,25 +175,61 @@ async function requireGoogleAuth(req, res, next) {
     req.googleToken = await getFreshToken();
     next();
   } catch (e) {
+    console.error('Token refresh failed:', e.message);
     res.status(401).json({ error: 'Token refresh failed: ' + e.message });
   }
 }
 
-const googleProxy = createProxyMiddleware({
-  target: 'https://www.googleapis.com',
-  changeOrigin: true,
-  pathRewrite: { '^/api/google': '' },
-  on: {
-    proxyReq(proxyReq, req) {
-      proxyReq.setHeader('Authorization', 'Bearer ' + req.googleToken);
+// Pipe-based proxy using Node's built-in https — avoids http-proxy-middleware
+// hanging issues on Render. Express strips /api/google from req.url before this runs.
+app.all('/api/google/*', requireGoogleAuth, (req, res) => {
+  const proxyReq = https.request(
+    {
+      hostname: 'www.googleapis.com',
+      path: req.url,   // already stripped of /api/google by Express
+      method: req.method,
+      headers: {
+        ...req.headers,
+        host: 'www.googleapis.com',
+        authorization: 'Bearer ' + req.googleToken,
+      },
+      timeout: 30_000,
     },
-    error(err, req, res) {
-      if (!res.headersSent) res.status(502).json({ error: 'Proxy error: ' + err.message });
+    (proxyRes) => {
+      res.status(proxyRes.statusCode);
+      for (const [k, v] of Object.entries(proxyRes.headers)) {
+        // Skip encoding headers — piping the raw stream handles them directly
+        if (k !== 'content-encoding' && k !== 'transfer-encoding') res.setHeader(k, v);
+      }
+      proxyRes.pipe(res);
     }
-  }
+  );
+
+  proxyReq.on('timeout', () => {
+    proxyReq.destroy();
+    if (!res.headersSent) res.status(504).json({ error: 'Google API request timed out' });
+  });
+
+  proxyReq.on('error', (err) => {
+    console.error('Google API proxy error:', err.message);
+    if (!res.headersSent) res.status(502).json({ error: 'Proxy error: ' + err.message });
+  });
+
+  req.pipe(proxyReq);
 });
 
-app.use('/api/google', requireGoogleAuth, googleProxy);
+// Quick Drive connectivity test — visit /api/drive/test to verify token works
+app.get('/api/drive/test', requireGoogleAuth, async (req, res) => {
+  try {
+    const r = await fetch('https://www.googleapis.com/drive/v3/about?fields=user', {
+      headers: { authorization: 'Bearer ' + req.googleToken },
+    });
+    const data = await r.json();
+    res.json({ ok: r.ok, status: r.status, user: data.user ?? data });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 // ─── Static files ──────────────────────────────────────────────────────────────
 app.use(express.static(path.join(__dirname, 'public')));
