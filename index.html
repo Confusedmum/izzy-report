@@ -302,7 +302,7 @@ let accessToken = null;
 function getAuthUrl() {
   const params = new URLSearchParams({
     client_id: CONFIG.GOOGLE_CLIENT_ID,
-    redirect_uri: window.location.origin + window.location.pathname,
+    redirect_uri: 'https://izzy-report.turnerschedule.workers.dev',
     response_type: 'token',
     scope: CONFIG.GOOGLE_SCOPES,
     include_granted_scopes: 'true'
@@ -324,7 +324,7 @@ function signOut() {
   if (accessToken) {
     fetch('https://oauth2.googleapis.com/revoke?token=' + accessToken, { method: 'POST' });
   }
-  window.location.href = window.location.origin + window.location.pathname;
+  window.location.href = 'https://izzy-report.turnerschedule.workers.dev';
 }
 
 function checkTokenInUrl() {
