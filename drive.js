@@ -1,88 +1,93 @@
-// Google Drive helpers
+// Google Drive helpers — uses plain fetch with access token
 const Drive = {
   folderId: null,
   stateFileId: null,
+  state: { reportedTxIds: {}, categoryPrefs: null, receipts: {} },
+  _getToken: null,
 
-  async init() {
+  token() { return this._getToken ? this._getToken() : null; },
+
+  async init(getTokenFn) {
+    this._getToken = getTokenFn;
     this.folderId = await this.getOrCreateFolder(CONFIG.DRIVE_FOLDER_NAME);
     await this.loadState();
   },
 
-  async getOrCreateFolder(name) {
-    const res = await gapi.client.drive.files.list({
-      q: `name='${name}' and mimeType='application/vnd.google-apps.folder' and trashed=false`,
-      fields: 'files(id)'
+  async apiFetch(url, options = {}) {
+    const res = await fetch(url, {
+      ...options,
+      headers: { 'Authorization': 'Bearer ' + this.token(), ...(options.headers || {}) }
     });
-    if (res.result.files.length > 0) return res.result.files[0].id;
-    const created = await gapi.client.drive.files.create({
-      resource: { name, mimeType: 'application/vnd.google-apps.folder' },
-      fields: 'id'
-    });
-    return created.result.id;
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Drive API error ${res.status}: ${err}`);
+    }
+    return res;
   },
 
-  // State: stores reported tx IDs, category prefs, receipts index
-  state: { reportedTxIds: {}, categoryPrefs: null, receipts: {} },
+  async apiJson(url, options = {}) {
+    const res = await this.apiFetch(url, options);
+    return res.json();
+  },
+
+  async getOrCreateFolder(name) {
+    const data = await this.apiJson(
+      `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(`name='${name}' and mimeType='application/vnd.google-apps.folder' and trashed=false`)}&fields=files(id)`
+    );
+    if (data.files && data.files.length > 0) return data.files[0].id;
+    const created = await this.apiJson('https://www.googleapis.com/drive/v3/files?fields=id', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, mimeType: 'application/vnd.google-apps.folder' })
+    });
+    return created.id;
+  },
 
   async loadState() {
-    const res = await gapi.client.drive.files.list({
-      q: `name='state.json' and '${this.folderId}' in parents and trashed=false`,
-      fields: 'files(id)'
-    });
-    if (res.result.files.length === 0) { this.stateFileId = null; return; }
-    this.stateFileId = res.result.files[0].id;
-    const content = await gapi.client.drive.files.get({
-      fileId: this.stateFileId, alt: 'media'
-    });
-    try { this.state = JSON.parse(content.body); } catch(e) {}
+    const data = await this.apiJson(
+      `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(`name='state.json' and '${this.folderId}' in parents and trashed=false`)}&fields=files(id)`
+    );
+    if (!data.files || data.files.length === 0) { this.stateFileId = null; return; }
+    this.stateFileId = data.files[0].id;
+    const res = await this.apiFetch(`https://www.googleapis.com/drive/v3/files/${this.stateFileId}?alt=media`);
+    try { this.state = await res.json(); } catch(e) {}
   },
 
   async saveState() {
     const body = JSON.stringify(this.state);
     if (this.stateFileId) {
-      await fetch(`https://www.googleapis.com/upload/drive/v3/files/${this.stateFileId}?uploadType=media`, {
-        method: 'PATCH',
-        headers: { 'Authorization': 'Bearer ' + gapi.client.getToken().access_token, 'Content-Type': 'application/json' },
-        body
+      await this.apiFetch(`https://www.googleapis.com/upload/drive/v3/files/${this.stateFileId}?uploadType=media`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body
       });
     } else {
-      const meta = await gapi.client.drive.files.create({
-        resource: { name: 'state.json', parents: [this.folderId] },
-        fields: 'id'
+      const meta = await this.apiJson('https://www.googleapis.com/drive/v3/files?fields=id', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 'state.json', parents: [this.folderId] })
       });
-      this.stateFileId = meta.result.id;
-      await fetch(`https://www.googleapis.com/upload/drive/v3/files/${this.stateFileId}?uploadType=media`, {
-        method: 'PATCH',
-        headers: { 'Authorization': 'Bearer ' + gapi.client.getToken().access_token, 'Content-Type': 'application/json' },
-        body
+      this.stateFileId = meta.id;
+      await this.apiFetch(`https://www.googleapis.com/upload/drive/v3/files/${this.stateFileId}?uploadType=media`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body
       });
     }
   },
 
   async uploadReceipt(txId, dataUrl, filename) {
-    // Convert dataUrl to blob
     const res = await fetch(dataUrl);
     const blob = await res.blob();
     const existingId = this.state.receipts[txId]?.fileId;
     if (existingId) {
-      // Update existing
-      await fetch(`https://www.googleapis.com/upload/drive/v3/files/${existingId}?uploadType=media`, {
-        method: 'PATCH',
-        headers: { 'Authorization': 'Bearer ' + gapi.client.getToken().access_token, 'Content-Type': blob.type },
-        body: blob
+      await this.apiFetch(`https://www.googleapis.com/upload/drive/v3/files/${existingId}?uploadType=media`, {
+        method: 'PATCH', headers: { 'Content-Type': blob.type }, body: blob
       });
       this.state.receipts[txId] = { fileId: existingId, filename };
     } else {
       const form = new FormData();
       form.append('metadata', new Blob([JSON.stringify({ name: `receipt_${txId}_${filename}`, parents: [this.folderId] })], { type: 'application/json' }));
       form.append('file', blob);
-      const up = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id', {
-        method: 'POST',
-        headers: { 'Authorization': 'Bearer ' + gapi.client.getToken().access_token },
-        body: form
+      const up = await this.apiJson('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id', {
+        method: 'POST', body: form
       });
-      const json = await up.json();
-      this.state.receipts[txId] = { fileId: json.id, filename };
+      this.state.receipts[txId] = { fileId: up.id, filename };
     }
     await this.saveState();
   },
@@ -90,7 +95,7 @@ const Drive = {
   async deleteReceipt(txId) {
     const entry = this.state.receipts[txId];
     if (!entry) return;
-    try { await gapi.client.drive.files.delete({ fileId: entry.fileId }); } catch(e) {}
+    try { await this.apiFetch(`https://www.googleapis.com/drive/v3/files/${entry.fileId}`, { method: 'DELETE' }); } catch(e) {}
     delete this.state.receipts[txId];
     await this.saveState();
   },
@@ -99,45 +104,33 @@ const Drive = {
     const entry = this.state.receipts[txId];
     if (!entry) return null;
     try {
-      const token = gapi.client.getToken().access_token;
-      const res = await fetch(`https://www.googleapis.com/drive/v3/files/${entry.fileId}?alt=media`, {
-        headers: { 'Authorization': 'Bearer ' + token }
-      });
+      const res = await this.apiFetch(`https://www.googleapis.com/drive/v3/files/${entry.fileId}?alt=media`);
       const blob = await res.blob();
       return await new Promise(resolve => {
-        const r = new FileReader();
-        r.onload = e => resolve(e.target.result);
-        r.readAsDataURL(blob);
+        const r = new FileReader(); r.onload = e => resolve(e.target.result); r.readAsDataURL(blob);
       });
     } catch(e) { return null; }
   },
 
-  markReported(txIds, period) {
+  async markReported(txIds, period) {
     txIds.forEach(id => { this.state.reportedTxIds[id] = period; });
     return this.saveState();
   },
 
   isReported(txId) { return !!this.state.reportedTxIds[txId]; },
   getReportedPeriod(txId) { return this.state.reportedTxIds[txId] || null; },
-
   saveCategoryPrefs(prefs) { this.state.categoryPrefs = prefs; return this.saveState(); },
   getCategoryPrefs() { return this.state.categoryPrefs; },
 
   async createGoogleDoc(title, htmlContent) {
-    // Create a Google Doc via Drive upload of HTML
-    const blob = new Blob([htmlContent], { type: 'text/html' });
     const form = new FormData();
     form.append('metadata', new Blob([JSON.stringify({
-      name: title,
-      parents: [this.folderId],
+      name: title, parents: [this.folderId],
       mimeType: 'application/vnd.google-apps.document'
     })], { type: 'application/json' }));
-    form.append('file', blob);
-    const res = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,webViewLink', {
-      method: 'POST',
-      headers: { 'Authorization': 'Bearer ' + gapi.client.getToken().access_token },
-      body: form
+    form.append('file', new Blob([htmlContent], { type: 'text/html' }));
+    return this.apiJson('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,webViewLink', {
+      method: 'POST', body: form
     });
-    return await res.json();
   }
 };
