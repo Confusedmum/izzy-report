@@ -181,8 +181,8 @@ async function requireGoogleAuth(req, res, next) {
 }
 
 // Pipe-based proxy using Node's built-in https — avoids http-proxy-middleware
-// hanging issues on Render. Express strips /api/google from req.url before this runs.
-app.all('/api/google/*', requireGoogleAuth, (req, res) => {
+// hanging issues on Render. app.use() strips /api/google from req.url; app.all() does not.
+app.use('/api/google', requireGoogleAuth, (req, res) => {
   const proxyReq = https.request(
     {
       hostname: 'www.googleapis.com',
