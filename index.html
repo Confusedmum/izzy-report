@@ -367,6 +367,7 @@ function onGisLoad() {
     scope: CONFIG.GOOGLE_SCOPES,
     callback: async (resp) => {
       if (resp.error) { showAuthError('Sign-in failed: ' + resp.error); return; }
+      gapi.client.setToken({ access_token: resp.access_token });
       await onSignedIn();
     }
   });
@@ -382,13 +383,13 @@ function checkReady() {
 
 function signIn() {
   if (!gapiReady || !gisReady) { showAuthError('Still loading, please wait...'); return; }
-  tokenClient.requestAccessToken({ prompt: 'consent' });
+  tokenClient.requestAccessToken({ prompt: '' });
 }
 
 function signOut() {
-  const token = gapi.auth.getToken();
+  const token = gapi.client.getToken();
   if (token) google.accounts.oauth2.revoke(token.access_token, () => {});
-  gapi.auth.setToken(null);
+  gapi.client.setToken(null);
   location.reload();
 }
 

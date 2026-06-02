@@ -42,7 +42,7 @@ const Drive = {
     if (this.stateFileId) {
       await fetch(`https://www.googleapis.com/upload/drive/v3/files/${this.stateFileId}?uploadType=media`, {
         method: 'PATCH',
-        headers: { 'Authorization': 'Bearer ' + gapi.auth.getToken().access_token, 'Content-Type': 'application/json' },
+        headers: { 'Authorization': 'Bearer ' + gapi.client.getToken().access_token, 'Content-Type': 'application/json' },
         body
       });
     } else {
@@ -53,7 +53,7 @@ const Drive = {
       this.stateFileId = meta.result.id;
       await fetch(`https://www.googleapis.com/upload/drive/v3/files/${this.stateFileId}?uploadType=media`, {
         method: 'PATCH',
-        headers: { 'Authorization': 'Bearer ' + gapi.auth.getToken().access_token, 'Content-Type': 'application/json' },
+        headers: { 'Authorization': 'Bearer ' + gapi.client.getToken().access_token, 'Content-Type': 'application/json' },
         body
       });
     }
@@ -68,7 +68,7 @@ const Drive = {
       // Update existing
       await fetch(`https://www.googleapis.com/upload/drive/v3/files/${existingId}?uploadType=media`, {
         method: 'PATCH',
-        headers: { 'Authorization': 'Bearer ' + gapi.auth.getToken().access_token, 'Content-Type': blob.type },
+        headers: { 'Authorization': 'Bearer ' + gapi.client.getToken().access_token, 'Content-Type': blob.type },
         body: blob
       });
       this.state.receipts[txId] = { fileId: existingId, filename };
@@ -78,7 +78,7 @@ const Drive = {
       form.append('file', blob);
       const up = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id', {
         method: 'POST',
-        headers: { 'Authorization': 'Bearer ' + gapi.auth.getToken().access_token },
+        headers: { 'Authorization': 'Bearer ' + gapi.client.getToken().access_token },
         body: form
       });
       const json = await up.json();
@@ -99,7 +99,7 @@ const Drive = {
     const entry = this.state.receipts[txId];
     if (!entry) return null;
     try {
-      const token = gapi.auth.getToken().access_token;
+      const token = gapi.client.getToken().access_token;
       const res = await fetch(`https://www.googleapis.com/drive/v3/files/${entry.fileId}?alt=media`, {
         headers: { 'Authorization': 'Bearer ' + token }
       });
@@ -135,7 +135,7 @@ const Drive = {
     form.append('file', blob);
     const res = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,webViewLink', {
       method: 'POST',
-      headers: { 'Authorization': 'Bearer ' + gapi.auth.getToken().access_token },
+      headers: { 'Authorization': 'Bearer ' + gapi.client.getToken().access_token },
       body: form
     });
     return await res.json();
