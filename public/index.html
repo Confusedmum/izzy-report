@@ -293,7 +293,85 @@ td { padding: 8px; vertical-align: top; }
 </div>
 
 <script src="config.js"></script>
-<script src="drive.js"></script>
+<script>
+// ─── Drive — all operations go through server API endpoints ───────────────────
+const Drive = {
+  state: { reportedTxIds: {}, categoryPrefs: null, receipts: {} },
+
+  async init() {
+    const res = await fetch('/api/drive/init');
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `Drive init failed (${res.status})`);
+    }
+    const data = await res.json();
+    this.state = { reportedTxIds: {}, categoryPrefs: null, receipts: {}, ...data.state };
+  },
+
+  isReported(txId)      { return !!this.state.reportedTxIds?.[txId]; },
+  getReportedPeriod(txId) { return this.state.reportedTxIds?.[txId] || null; },
+  getCategoryPrefs()    { return this.state.categoryPrefs; },
+
+  async _saveState() {
+    const res = await fetch('/api/drive/state', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(this.state),
+    });
+    if (!res.ok) throw new Error('Failed to save state');
+  },
+
+  async markReported(txIds, period) {
+    if (!this.state.reportedTxIds) this.state.reportedTxIds = {};
+    txIds.forEach(id => { this.state.reportedTxIds[id] = period; });
+    return this._saveState();
+  },
+
+  async saveCategoryPrefs(prefs) {
+    this.state.categoryPrefs = prefs;
+    return this._saveState();
+  },
+
+  async uploadReceipt(txId, dataUrl, filename) {
+    const res = await fetch('/api/drive/receipt/' + txId, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dataUrl, filename }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Upload failed');
+    if (!this.state.receipts) this.state.receipts = {};
+    this.state.receipts[txId] = { fileId: data.fileId, filename };
+  },
+
+  async deleteReceipt(txId) {
+    await fetch('/api/drive/receipt/' + txId, { method: 'DELETE' });
+    if (this.state.receipts) delete this.state.receipts[txId];
+    return this._saveState();
+  },
+
+  async getReceiptDataUrl(txId) {
+    if (!this.state.receipts?.[txId]) return null;
+    try {
+      const res = await fetch('/api/drive/receipt/' + txId);
+      if (!res.ok) return null;
+      const data = await res.json();
+      return data.dataUrl;
+    } catch (e) { return null; }
+  },
+
+  async createGoogleDoc(title, htmlContent) {
+    const res = await fetch('/api/drive/doc', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title, htmlContent }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Doc creation failed');
+    return data;
+  },
+};
+</script>
 <script>
 // ─── Auth ─────────────────────────────────────────────────────────────────────
 function signIn() { window.location.href = '/auth/login'; }

@@ -6,9 +6,9 @@ const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const FOLDER_NAME = 'Izzy Report Tool';
 
-const SCOPES = ['https://www.googleapis.com/auth/drive.file'];
-
+// ─── OAuth client ──────────────────────────────────────────────────────────────
 function makeOAuthClient() {
   return new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
@@ -17,7 +17,6 @@ function makeOAuthClient() {
   );
 }
 
-// Shared OAuth client — holds the refresh token for all users of the app
 const oauthClient = makeOAuthClient();
 let googleReady = false;
 
@@ -26,22 +25,85 @@ if (process.env.GOOGLE_REFRESH_TOKEN) {
   googleReady = true;
 }
 
-// Token cache so we don't call Google on every proxied request
-let cachedToken = null;
-let tokenExpiry = 0;
+// googleapis Drive client — oauthClient handles token refresh automatically
+const driveApi = google.drive({ version: 'v3', auth: oauthClient });
 
-async function getFreshToken() {
-  if (cachedToken && tokenExpiry > Date.now() + 60_000) return cachedToken;
-  const { token } = await oauthClient.getAccessToken();
-  if (!token) throw new Error('No access token returned — refresh token may be invalid');
-  cachedToken = token;
-  // expiry_date lives on oauthClient.credentials after the call
-  tokenExpiry = oauthClient.credentials.expiry_date ?? Date.now() + 55 * 60 * 1000;
-  console.log('Access token refreshed, expires', new Date(tokenExpiry).toISOString());
-  return token;
+// ─── Server-side Drive state ────────────────────────────────────────────────────
+let driveFolderId  = null;
+let driveStateFileId = null;
+let driveAppState  = { reportedTxIds: {}, categoryPrefs: null, receipts: {} };
+let driveInitPromise = null;
+
+async function getDriveFolder() {
+  if (driveFolderId) return driveFolderId;
+  const res = await driveApi.files.list({
+    q: `name='${FOLDER_NAME}' and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+    fields: 'files(id)',
+  });
+  if (res.data.files.length > 0) {
+    driveFolderId = res.data.files[0].id;
+  } else {
+    const created = await driveApi.files.create({
+      requestBody: { name: FOLDER_NAME, mimeType: 'application/vnd.google-apps.folder' },
+      fields: 'id',
+    });
+    driveFolderId = created.data.id;
+  }
+  return driveFolderId;
 }
 
-// ─── Session (only needed for the one-time setup flow) ────────────────────────
+async function loadState() {
+  const folderId = await getDriveFolder();
+  const res = await driveApi.files.list({
+    q: `name='state.json' and '${folderId}' in parents and trashed=false`,
+    fields: 'files(id)',
+  });
+  if (res.data.files.length === 0) { driveStateFileId = null; return; }
+  driveStateFileId = res.data.files[0].id;
+  const content = await driveApi.files.get(
+    { fileId: driveStateFileId, alt: 'media' },
+    { responseType: 'json' }
+  );
+  driveAppState = {
+    reportedTxIds: {},
+    categoryPrefs: null,
+    receipts: {},
+    ...content.data,
+  };
+}
+
+async function saveState() {
+  const folderId = await getDriveFolder();
+  const body = JSON.stringify(driveAppState);
+  if (driveStateFileId) {
+    await driveApi.files.update({
+      fileId: driveStateFileId,
+      media: { mimeType: 'application/json', body },
+    });
+  } else {
+    const created = await driveApi.files.create({
+      requestBody: { name: 'state.json', parents: [folderId] },
+      media: { mimeType: 'application/json', body },
+      fields: 'id',
+    });
+    driveStateFileId = created.data.id;
+  }
+}
+
+// Called by every Drive endpoint — initialises folder + state once, then caches
+async function ensureDriveReady() {
+  if (!driveInitPromise) {
+    driveInitPromise = getDriveFolder()
+      .then(() => loadState())
+      .catch(err => {
+        driveInitPromise = null; // allow retry on next request
+        throw err;
+      });
+  }
+  return driveInitPromise;
+}
+
+// ─── Middleware ────────────────────────────────────────────────────────────────
 app.use(session({
   secret: process.env.SESSION_SECRET || 'izzy-report-dev-secret',
   resave: false,
@@ -49,19 +111,19 @@ app.use(session({
   cookie: {
     secure: process.env.NODE_ENV === 'production',
     httpOnly: true,
-    maxAge: 24 * 60 * 60 * 1000
-  }
+    maxAge: 24 * 60 * 60 * 1000,
+  },
 }));
 
+// JSON body parsing for Drive API endpoints (15 MB covers receipt uploads)
+app.use(express.json({ limit: '15mb' }));
+
 // ─── Auth routes ───────────────────────────────────────────────────────────────
+const SCOPES = ['https://www.googleapis.com/auth/drive.file'];
+
 app.get('/auth/login', (req, res) => {
   const client = makeOAuthClient();
-  const url = client.generateAuthUrl({
-    access_type: 'offline',
-    scope: SCOPES,
-    prompt: 'consent'   // force refresh_token to be returned every time
-  });
-  res.redirect(url);
+  res.redirect(client.generateAuthUrl({ access_type: 'offline', scope: SCOPES, prompt: 'consent' }));
 });
 
 app.get('/auth/callback', async (req, res) => {
@@ -71,13 +133,10 @@ app.get('/auth/callback', async (req, res) => {
     const client = makeOAuthClient();
     const { tokens } = await client.getToken(code);
     oauthClient.setCredentials(tokens);
-    cachedToken = tokens.access_token;
-    tokenExpiry = tokens.expiry_date ?? Date.now() + 55 * 60 * 1000;
     googleReady = true;
-    const rt = tokens.refresh_token || '';
-    console.log('OAuth success. refresh_token present:', !!rt);
-    // Render the page directly here — no redirect, no session needed
-    res.send(buildSetupDonePage(rt));
+    driveInitPromise = null; // reset so the new credentials are used
+    console.log('OAuth success. refresh_token present:', !!tokens.refresh_token);
+    res.send(buildSetupDonePage(tokens.refresh_token || ''));
   } catch (e) {
     const googleError = e.response?.data;
     console.error('OAuth callback failed:', JSON.stringify(googleError || e.message));
@@ -106,54 +165,42 @@ function buildSetupDonePage(rt) {
   .copy-btn { position: absolute; top: 6px; right: 6px; font-size: 12px; padding: 3px 10px; border: 1px solid #ccc; border-radius: 4px; background: white; cursor: pointer; }
   .copy-btn:hover { background: #f0f0f0; }
   .warn-box { background: #fef2f2; border: 1px solid #fca5a5; border-radius: 8px; padding: 1rem; margin: 1rem 0; font-size: 13px; }
-  .ok-box { background: #f0fdf4; border: 1px solid #86efac; border-radius: 8px; padding: 1rem; margin: 1rem 0; font-size: 14px; }
   .btn { display: inline-block; margin-top: 1.25rem; padding: 10px 20px; background: #2d5a3d; color: white; border-radius: 8px; text-decoration: none; font-size: 14px; font-weight: 500; }
   .btn:hover { background: #1d3d29; }
 </style>
 </head><body><div class="card">
 <h2><span class="green">✓</span> Google Drive connected</h2>
-<p style="margin-top:0.5rem;">Sign-in worked. ${noToken ? 'However, no refresh token was returned — see below.' : 'Now save your refresh token to keep the app connected permanently.'}</p>
-
+<p style="margin-top:0.5rem;">${noToken ? 'Sign-in worked but no refresh token was returned — see below.' : 'Sign-in worked. Save the refresh token so the app stays connected after restarts.'}</p>
 ${noToken ? `
 <div class="warn-box">
-  <strong>No refresh token was returned by Google.</strong><br/>
-  This usually means the app was already authorised and Google skipped issuing a new one.
-  To get one: go to <a href="https://myaccount.google.com/permissions" target="_blank">myaccount.google.com/permissions</a>, remove <strong>Izzy Report Tool</strong>, then <a href="/auth/login">sign in again</a>.
-</div>
-` : `
+  <strong>No refresh token returned.</strong> This happens when the app was previously authorised.
+  Go to <a href="https://myaccount.google.com/permissions" target="_blank">myaccount.google.com/permissions</a>,
+  remove <strong>Izzy Report Tool</strong>, then <a href="/auth/login">sign in again</a>.
+</div>` : `
 <div class="step">
   <h3>Do this now — before navigating away</h3>
   <ol>
-    <li>Copy the token below (click the box to select all, then Cmd+C / Ctrl+C)</li>
-    <li>Open your <strong>Render dashboard</strong> → your web service → <strong>Environment</strong></li>
-    <li>Add a new variable: name = <code>GOOGLE_REFRESH_TOKEN</code>, value = the token</li>
-    <li>Click <strong>Save Changes</strong> — Render will redeploy automatically</li>
-    <li>Once redeployed, the app will stay connected without needing to sign in again</li>
+    <li>Copy the token below</li>
+    <li>Render dashboard → your service → <strong>Environment</strong></li>
+    <li>Add variable: <code>GOOGLE_REFRESH_TOKEN</code> = the token</li>
+    <li>Save Changes → Render redeploys automatically</li>
   </ol>
   <div class="token-box" style="margin-top:0.75rem;">
     <textarea id="rt" rows="3" readonly onclick="this.select()">${rt}</textarea>
     <button class="copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('rt').value).then(()=>{this.textContent='Copied!';setTimeout(()=>this.textContent='Copy',2000)})">Copy</button>
   </div>
-</div>
-<p style="font-size:12px;color:#888;">The app is already working in this browser session. The token above is only needed so it stays connected after Render restarts or redeploys.</p>
-`}
-
+</div>`}
 <a href="/" class="btn">Open the app →</a>
 </div></body></html>`;
 }
 
-app.get('/auth/logout', (req, res) => {
-  // Shared auth — nothing to clear server-side for workers
-  // Just redirect home; client resets its state on page load
-  res.redirect('/');
-});
+app.get('/auth/logout', (req, res) => res.redirect('/'));
 
-// ─── Status endpoint ───────────────────────────────────────────────────────────
+// ─── Status + debug endpoints ──────────────────────────────────────────────────
 app.get('/api/auth/status', (req, res) => {
   res.json({ configured: googleReady });
 });
 
-// ─── Debug endpoint (safe — never exposes secrets) ────────────────────────────
 app.get('/auth/debug', (req, res) => {
   const cid = process.env.GOOGLE_CLIENT_ID;
   const cs  = process.env.GOOGLE_CLIENT_SECRET;
@@ -167,69 +214,144 @@ app.get('/auth/debug', (req, res) => {
   });
 });
 
-// ─── Google API proxy ──────────────────────────────────────────────────────────
-async function requireGoogleAuth(req, res, next) {
-  if (!googleReady) return res.status(401).json({ error: 'Google Drive not configured. Admin must sign in first.' });
-  try {
-    req.googleToken = await getFreshToken();
-    next();
-  } catch (e) {
-    console.error('Token refresh failed:', e.message);
-    res.status(401).json({ error: 'Token refresh failed: ' + e.message });
-  }
+// ─── Drive API middleware ──────────────────────────────────────────────────────
+function requireDrive(req, res, next) {
+  if (!googleReady) return res.status(401).json({ error: 'Google Drive not configured — admin must sign in first' });
+  next();
 }
 
-// fetch()-based proxy — same approach as /api/drive/test which is confirmed working.
-// app.use() strips /api/google from req.url before this handler runs.
-app.use('/api/google', requireGoogleAuth, (req, res) => {
-  (async () => {
-    const targetUrl = 'https://www.googleapis.com' + req.url;
-    console.log('Proxy:', req.method, targetUrl.slice(0, 100));
+// ─── Drive endpoints ───────────────────────────────────────────────────────────
 
-    // Forward headers, stripping hop-by-hop and encoding headers
-    const headers = { ...req.headers };
-    delete headers.host;
-    delete headers.connection;
-    delete headers['accept-encoding']; // prevent compressed responses we can't pipe safely
-    headers.authorization = 'Bearer ' + req.googleToken;
-
-    const fetchInit = { method: req.method, headers };
-
-    // Buffer the request body for writes (POST, PATCH, DELETE, etc.)
-    if (req.method !== 'GET' && req.method !== 'HEAD') {
-      const chunks = [];
-      for await (const chunk of req) chunks.push(chunk);
-      fetchInit.body = Buffer.concat(chunks);
-    }
-
-    const googleRes = await fetch(targetUrl, {
-      ...fetchInit,
-      signal: AbortSignal.timeout(30_000),
-    });
-
-    res.status(googleRes.status);
-    for (const [k, v] of googleRes.headers.entries()) {
-      if (!['content-encoding', 'transfer-encoding', 'connection'].includes(k)) {
-        res.setHeader(k, v);
-      }
-    }
-
-    const buf = await googleRes.arrayBuffer();
-    res.end(Buffer.from(buf));
-  })().catch(err => {
-    console.error('Google proxy error:', err.message);
-    if (!res.headersSent) res.status(502).json({ error: 'Proxy error: ' + err.message });
-  });
+// Initialise: find/create folder, load state, return state to client
+app.get('/api/drive/init', requireDrive, async (req, res) => {
+  try {
+    await ensureDriveReady();
+    res.json({ state: driveAppState });
+  } catch (e) {
+    console.error('Drive init error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
 });
 
-// Quick Drive connectivity test — visit /api/drive/test to verify token works
-app.get('/api/drive/test', requireGoogleAuth, async (req, res) => {
+// Save full state object
+app.post('/api/drive/state', requireDrive, async (req, res) => {
   try {
-    const r = await fetch('https://www.googleapis.com/drive/v3/about?fields=user', {
-      headers: { authorization: 'Bearer ' + req.googleToken },
+    await ensureDriveReady();
+    driveAppState = req.body;
+    await saveState();
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('Save state error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Upload or replace a receipt
+app.post('/api/drive/receipt/:txId', requireDrive, async (req, res) => {
+  try {
+    await ensureDriveReady();
+    const { txId } = req.params;
+    const { dataUrl, filename } = req.body;
+
+    const [header, b64] = dataUrl.split(',');
+    const mime = header.split(':')[1].split(';')[0];
+    const buf  = Buffer.from(b64, 'base64');
+    const folderId = await getDriveFolder();
+
+    const existingFileId = driveAppState.receipts?.[txId]?.fileId;
+    let fileId;
+
+    if (existingFileId) {
+      await driveApi.files.update({ fileId: existingFileId, media: { mimeType: mime, body: buf } });
+      fileId = existingFileId;
+    } else {
+      const created = await driveApi.files.create({
+        requestBody: { name: `receipt_${txId}_${filename}`, parents: [folderId] },
+        media: { mimeType: mime, body: buf },
+        fields: 'id',
+      });
+      fileId = created.data.id;
+    }
+
+    if (!driveAppState.receipts) driveAppState.receipts = {};
+    driveAppState.receipts[txId] = { fileId, filename, mime };
+    await saveState();
+    res.json({ fileId });
+  } catch (e) {
+    console.error('Receipt upload error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Return a receipt as a base64 data URL
+app.get('/api/drive/receipt/:txId', requireDrive, async (req, res) => {
+  try {
+    await ensureDriveReady();
+    const entry = driveAppState.receipts?.[req.params.txId];
+    if (!entry) return res.status(404).json({ error: 'No receipt for this transaction' });
+
+    const stream = await driveApi.files.get(
+      { fileId: entry.fileId, alt: 'media' },
+      { responseType: 'stream' }
+    );
+    const chunks = [];
+    await new Promise((resolve, reject) => {
+      stream.data.on('data', c => chunks.push(c));
+      stream.data.on('end', resolve);
+      stream.data.on('error', reject);
     });
-    const data = await r.json();
-    res.json({ ok: r.ok, status: r.status, user: data.user ?? data });
+    const mime = entry.mime || 'image/jpeg';
+    res.json({ dataUrl: `data:${mime};base64,${Buffer.concat(chunks).toString('base64')}` });
+  } catch (e) {
+    console.error('Receipt get error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Delete a receipt
+app.delete('/api/drive/receipt/:txId', requireDrive, async (req, res) => {
+  try {
+    await ensureDriveReady();
+    const entry = driveAppState.receipts?.[req.params.txId];
+    if (entry) {
+      try { await driveApi.files.delete({ fileId: entry.fileId }); } catch (_) {}
+      delete driveAppState.receipts[req.params.txId];
+      await saveState();
+    }
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('Receipt delete error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Create a Google Doc from HTML (receipt annex)
+app.post('/api/drive/doc', requireDrive, async (req, res) => {
+  try {
+    await ensureDriveReady();
+    const { title, htmlContent } = req.body;
+    const folderId = await getDriveFolder();
+    const created = await driveApi.files.create({
+      requestBody: {
+        name: title,
+        parents: [folderId],
+        mimeType: 'application/vnd.google-apps.document',
+      },
+      media: { mimeType: 'text/html', body: htmlContent },
+      fields: 'id,webViewLink',
+    });
+    res.json({ webViewLink: created.data.webViewLink });
+  } catch (e) {
+    console.error('Doc creation error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Quick connectivity check
+app.get('/api/drive/test', requireDrive, async (req, res) => {
+  try {
+    const r = await driveApi.about.get({ fields: 'user' });
+    res.json({ ok: true, user: r.data.user });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -238,7 +360,6 @@ app.get('/api/drive/test', requireGoogleAuth, async (req, res) => {
 // ─── Static files ──────────────────────────────────────────────────────────────
 app.use(express.static(path.join(__dirname, 'public')));
 
-// SPA fallback
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
