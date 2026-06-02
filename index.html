@@ -396,6 +396,12 @@ function signOut() {
 async function onSignedIn() {
   showLoading('Connecting to Google Drive...');
   try {
+    // Get access token from auth2 and set on gapi client
+    const authInstance = gapi.auth2.getAuthInstance();
+    const user = authInstance.currentUser.get();
+    const authResponse = user.getAuthResponse(true);
+    gapi.client.setToken({ access_token: authResponse.access_token });
+    
     await Drive.init();
     hideLoading();
     document.getElementById('authScreen').classList.add('section-hidden');
@@ -403,7 +409,7 @@ async function onSignedIn() {
     document.getElementById('pinScreen').classList.remove('section-hidden');
   } catch(e) {
     hideLoading();
-    showAuthError('Drive error: ' + e.message);
+    showAuthError('Drive error: ' + (e.message || JSON.stringify(e)));
   }
 }
 
@@ -973,6 +979,5 @@ ${pages.map((page,pi) => `<div class="${pi>0?'page':''}"><div class="grid">
 
 <!-- Google APIs -->
 <script src="https://apis.google.com/js/api.js" onload="onGapiLoad()"></script>
-<script src="https://accounts.google.com/gsi/client" onload="onGisLoad()"></script>
 </body>
 </html>
