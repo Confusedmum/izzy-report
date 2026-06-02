@@ -162,16 +162,17 @@ td { padding: 8px; vertical-align: top; }
   </div>
 </header>
 
-<!-- Auth screen: shown when Google Drive is not yet configured server-side -->
+<!-- Auth screen -->
 <div id="authScreen" class="center-screen">
   <div class="auth-card">
     <h2>Izzy Report Tool</h2>
-    <p id="authMsg">Checking connection...</p>
+    <p id="authMsg" style="min-height:2em;">Starting...</p>
     <a id="googleSignInBtn" href="/auth/login" class="google-btn" style="display:none;">
       <svg width="18" height="18" viewBox="0 0 18 18"><path fill="#4285F4" d="M16.51 8H8.98v3h4.3c-.18 1-.74 1.48-1.6 2.04v2.01h2.6a7.8 7.8 0 0 0 2.38-5.88c0-.57-.05-.66-.15-1.17z"/><path fill="#34A853" d="M8.98 17c2.16 0 3.97-.72 5.3-1.94l-2.6-2a4.8 4.8 0 0 1-7.18-2.54H1.83v2.07A8 8 0 0 0 8.98 17z"/><path fill="#FBBC05" d="M4.5 10.52a4.8 4.8 0 0 1 0-3.04V5.41H1.83a8 8 0 0 0 0 7.18l2.67-2.07z"/><path fill="#EA4335" d="M8.98 4.18c1.17 0 2.23.4 3.06 1.2l2.3-2.3A8 8 0 0 0 1.83 5.4L4.5 7.49a4.77 4.77 0 0 1 4.48-3.3z"/></svg>
       Connect Google Drive
     </a>
     <div id="authError"></div>
+    <button id="retryBtn" style="display:none;margin-top:12px;" onclick="init()">Try again</button>
   </div>
 </div>
 
@@ -294,6 +295,7 @@ td { padding: 8px; vertical-align: top; }
 
 <script src="config.js"></script>
 <script>
+console.log('[Izzy] Drive script block loading');
 // ─── Drive — all operations go through server API endpoints ───────────────────
 const Drive = {
   state: { reportedTxIds: {}, categoryPrefs: null, receipts: {} },
@@ -380,6 +382,7 @@ const Drive = {
 };
 </script>
 <script>
+console.log('[Izzy] App script block loading');
 // ─── Auth ─────────────────────────────────────────────────────────────────────
 function signIn() { window.location.href = '/auth/login'; }
 function signOut() { window.location.href = '/auth/logout'; }
@@ -399,55 +402,68 @@ let modalPendingDataUrl = null;
 let modalPendingFilename = null;
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
+function setMsg(text) {
+  console.log('[Izzy]', text);
+  document.getElementById('authMsg').textContent = text;
+}
+function setErr(text) {
+  console.error('[Izzy] ERROR:', text);
+  document.getElementById('authError').innerHTML = text ? `<div class="error-msg">${text}</div>` : '';
+  document.getElementById('retryBtn').style.display = text ? 'inline-block' : 'none';
+}
+
 async function init() {
-  // Check for OAuth error param
+  console.log('[Izzy] init() called');
+  document.getElementById('authError').innerHTML = '';
+  document.getElementById('retryBtn').style.display = 'none';
+  document.getElementById('googleSignInBtn').style.display = 'none';
+
   const params = new URLSearchParams(window.location.search);
   const setupError = params.get('setup_error');
   if (setupError) {
-    document.getElementById('authError').innerHTML = `<div class="error-msg">${setupError}</div>`;
+    setErr(setupError);
     window.history.replaceState({}, document.title, window.location.pathname);
   }
 
-  // Wrap fetch with a timeout so a sleeping Render server shows a clear message
-  // instead of a silent infinite spinner (free tier cold start can take 30–60s)
-  function fetchWithTimeout(url, opts, ms) {
+  // Step 1 — check server is up and Google credentials are configured
+  setMsg('Step 1/2: Checking server...');
+  let configured;
+  try {
     const controller = new AbortController();
-    const tid = setTimeout(() => controller.abort(), ms);
-    return fetch(url, { ...opts, signal: controller.signal }).finally(() => clearTimeout(tid));
+    const tid = setTimeout(() => controller.abort(), 20000);
+    const res = await fetch('/api/auth/status', { signal: controller.signal }).finally(() => clearTimeout(tid));
+    const data = await res.json();
+    configured = data.configured;
+    console.log('[Izzy] /api/auth/status →', data);
+  } catch(e) {
+    console.error('[Izzy] /api/auth/status failed:', e.name, e.message);
+    setMsg('Cannot reach server.');
+    setErr(e.name === 'AbortError'
+      ? 'Server took too long (>20s). It may be starting up — wait 30 seconds and click Try again.'
+      : 'Network error: ' + e.message);
+    return;
   }
 
-  showLoading('Connecting…');
+  if (!configured) {
+    setMsg('Google Drive not connected.');
+    document.getElementById('googleSignInBtn').style.display = 'flex';
+    return;
+  }
+
+  // Step 2 — initialise Google Drive (load folder + state)
+  setMsg('Step 2/2: Connecting to Google Drive...');
+  console.log('[Izzy] Drive.init() starting');
   try {
-    const res = await fetchWithTimeout('/api/auth/status', {}, 30000);
-    const { configured } = await res.json();
-
-    if (!configured) {
-      hideLoading();
-      document.getElementById('authMsg').textContent = 'Google Drive needs to be connected before the app can be used.';
-      document.getElementById('googleSignInBtn').style.display = 'flex';
-      return;
-    }
-
-    showLoading('Connecting to Google Drive…');
-    try {
-      await Drive.init();
-      hideLoading();
-      document.getElementById('authScreen').classList.add('section-hidden');
-      document.getElementById('signOutBtn').style.display = 'block';
-      document.getElementById('pinScreen').classList.remove('section-hidden');
-    } catch(e) {
-      hideLoading();
-      document.getElementById('authMsg').textContent = 'Could not connect to Google Drive.';
-      document.getElementById('authError').innerHTML = `<div class="error-msg">${e.message}</div>`;
-      document.getElementById('googleSignInBtn').style.display = 'flex';
-    }
+    await Drive.init();
+    console.log('[Izzy] Drive.init() succeeded');
+    document.getElementById('authScreen').classList.add('section-hidden');
+    document.getElementById('signOutBtn').style.display = 'block';
+    document.getElementById('pinScreen').classList.remove('section-hidden');
   } catch(e) {
-    hideLoading();
-    const isTimeout = e.name === 'AbortError';
-    document.getElementById('authMsg').textContent = isTimeout
-      ? 'Server is waking up — please wait a moment and refresh the page.'
-      : 'Could not reach the server.';
-    document.getElementById('authError').innerHTML = isTimeout ? '' : `<div class="error-msg">${e.message}</div>`;
+    console.error('[Izzy] Drive.init() failed:', e.name, e.message);
+    setMsg('Google Drive connection failed.');
+    setErr(e.message);
+    document.getElementById('googleSignInBtn').style.display = 'flex';
   }
 }
 
@@ -690,6 +706,7 @@ async function removeCurrentReceipt() {
   showLoading('Removing receipt...'); await Drive.deleteReceipt(modalTxId); hideLoading(); closeReceiptModal(); renderTable();
 }
 document.addEventListener('DOMContentLoaded', () => {
+  console.log('[Izzy] DOMContentLoaded — calling init()');
   const fi = document.getElementById('modalFileInput');
   const dz = document.getElementById('dropZone');
   fi.addEventListener('change', ()=>{ if(fi.files[0]) handleModalFile(fi.files[0]); });
