@@ -299,7 +299,14 @@ const Drive = {
   state: { reportedTxIds: {}, categoryPrefs: null, receipts: {} },
 
   async init() {
-    const res = await fetch('/api/drive/init');
+    const controller = new AbortController();
+    const tid = setTimeout(() => controller.abort(), 30000);
+    let res;
+    try {
+      res = await fetch('/api/drive/init', { signal: controller.signal });
+    } finally {
+      clearTimeout(tid);
+    }
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.error || `Drive init failed (${res.status})`);
@@ -401,9 +408,17 @@ async function init() {
     window.history.replaceState({}, document.title, window.location.pathname);
   }
 
-  showLoading('Connecting...');
+  // Wrap fetch with a timeout so a sleeping Render server shows a clear message
+  // instead of a silent infinite spinner (free tier cold start can take 30–60s)
+  function fetchWithTimeout(url, opts, ms) {
+    const controller = new AbortController();
+    const tid = setTimeout(() => controller.abort(), ms);
+    return fetch(url, { ...opts, signal: controller.signal }).finally(() => clearTimeout(tid));
+  }
+
+  showLoading('Connecting…');
   try {
-    const res = await fetch('/api/auth/status');
+    const res = await fetchWithTimeout('/api/auth/status', {}, 30000);
     const { configured } = await res.json();
 
     if (!configured) {
@@ -413,8 +428,7 @@ async function init() {
       return;
     }
 
-    // Google is connected — proceed to Drive init
-    showLoading('Connecting to Google Drive...');
+    showLoading('Connecting to Google Drive…');
     try {
       await Drive.init();
       hideLoading();
@@ -429,8 +443,11 @@ async function init() {
     }
   } catch(e) {
     hideLoading();
-    document.getElementById('authMsg').textContent = 'Could not reach the server.';
-    document.getElementById('authError').innerHTML = `<div class="error-msg">${e.message}</div>`;
+    const isTimeout = e.name === 'AbortError';
+    document.getElementById('authMsg').textContent = isTimeout
+      ? 'Server is waking up — please wait a moment and refresh the page.'
+      : 'Could not reach the server.';
+    document.getElementById('authError').innerHTML = isTimeout ? '' : `<div class="error-msg">${e.message}</div>`;
   }
 }
 
