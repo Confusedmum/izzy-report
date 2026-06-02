@@ -72,10 +72,10 @@ app.get('/auth/callback', async (req, res) => {
     cachedToken = tokens.access_token;
     tokenExpiry = tokens.expiry_date ?? Date.now() + 55 * 60 * 1000;
     googleReady = true;
-    if (tokens.refresh_token) {
-      req.session.newRefreshToken = tokens.refresh_token;
-    }
-    res.redirect('/auth/setup-done');
+    const rt = tokens.refresh_token || '';
+    console.log('OAuth success. refresh_token present:', !!rt);
+    // Render the page directly here — no redirect, no session needed
+    res.send(buildSetupDonePage(rt));
   } catch (e) {
     const googleError = e.response?.data;
     console.error('OAuth callback failed:', JSON.stringify(googleError || e.message));
@@ -84,29 +84,61 @@ app.get('/auth/callback', async (req, res) => {
   }
 });
 
-app.get('/auth/setup-done', (req, res) => {
-  const rt = req.session.newRefreshToken || '';
-  res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"/>
-<title>Setup complete</title>
-<style>body{font-family:system-ui,sans-serif;max-width:600px;margin:3rem auto;padding:1rem;line-height:1.6;}
-code{background:#f5f4f0;padding:2px 6px;border-radius:4px;font-size:13px;}
-textarea{width:100%;font-family:monospace;font-size:12px;background:#f5f4f0;border:1px solid #ddd;border-radius:6px;padding:8px;}
-.box{background:#f0fdf4;border:1px solid #86efac;border-radius:8px;padding:1rem;margin:1rem 0;}
-.warn{background:#fefce8;border:1px solid #fde047;border-radius:8px;padding:1rem;margin:1rem 0;}
-a{color:#2d5a3d;}</style>
-</head><body>
-<h2>✓ Google Drive connected</h2>
-<div class="box"><p>The app is now connected to Google Drive and ready to use.</p></div>
-${rt ? `<div class="warn">
-<p><strong>Save this refresh token as an environment variable</strong> so the connection survives server restarts and redeployments:</p>
-<p>Variable name: <code>GOOGLE_REFRESH_TOKEN</code></p>
-<textarea rows="3" onclick="this.select()">${rt}</textarea>
-<p style="font-size:13px;color:#666;">On Render: Dashboard → Environment → add the variable, then redeploy.<br/>
-On Railway: Variables → add the variable (auto-redeployed).</p>
-</div>` : ''}
-<p><a href="/">← Open the app</a></p>
-</body></html>`);
-});
+function buildSetupDonePage(rt) {
+  const noToken = !rt;
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"/>
+<title>Google Drive connected</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, sans-serif; background: #f5f4f0; color: #1a1916; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 1rem; }
+  .card { background: white; border-radius: 12px; padding: 2rem; max-width: 560px; width: 100%; box-shadow: 0 1px 4px rgba(0,0,0,.1); }
+  h2 { font-size: 20px; margin-bottom: 0.5rem; }
+  .green { color: #2d5a3d; }
+  p { font-size: 14px; color: #444; line-height: 1.6; }
+  .step { background: #fefce8; border: 1px solid #fde047; border-radius: 8px; padding: 1.25rem; margin: 1.25rem 0; }
+  .step h3 { font-size: 14px; font-weight: 600; margin-bottom: 0.75rem; }
+  .step ol { padding-left: 1.25rem; font-size: 13px; color: #333; line-height: 2; }
+  .step code { background: #f5f4f0; border: 1px solid #ddd; border-radius: 4px; padding: 1px 5px; font-family: monospace; font-size: 12px; }
+  .token-box { position: relative; margin: 0.5rem 0; }
+  textarea { width: 100%; font-family: monospace; font-size: 12px; background: #f5f4f0; border: 1px solid #ccc; border-radius: 6px; padding: 8px; resize: none; }
+  .copy-btn { position: absolute; top: 6px; right: 6px; font-size: 12px; padding: 3px 10px; border: 1px solid #ccc; border-radius: 4px; background: white; cursor: pointer; }
+  .copy-btn:hover { background: #f0f0f0; }
+  .warn-box { background: #fef2f2; border: 1px solid #fca5a5; border-radius: 8px; padding: 1rem; margin: 1rem 0; font-size: 13px; }
+  .ok-box { background: #f0fdf4; border: 1px solid #86efac; border-radius: 8px; padding: 1rem; margin: 1rem 0; font-size: 14px; }
+  .btn { display: inline-block; margin-top: 1.25rem; padding: 10px 20px; background: #2d5a3d; color: white; border-radius: 8px; text-decoration: none; font-size: 14px; font-weight: 500; }
+  .btn:hover { background: #1d3d29; }
+</style>
+</head><body><div class="card">
+<h2><span class="green">✓</span> Google Drive connected</h2>
+<p style="margin-top:0.5rem;">Sign-in worked. ${noToken ? 'However, no refresh token was returned — see below.' : 'Now save your refresh token to keep the app connected permanently.'}</p>
+
+${noToken ? `
+<div class="warn-box">
+  <strong>No refresh token was returned by Google.</strong><br/>
+  This usually means the app was already authorised and Google skipped issuing a new one.
+  To get one: go to <a href="https://myaccount.google.com/permissions" target="_blank">myaccount.google.com/permissions</a>, remove <strong>Izzy Report Tool</strong>, then <a href="/auth/login">sign in again</a>.
+</div>
+` : `
+<div class="step">
+  <h3>Do this now — before navigating away</h3>
+  <ol>
+    <li>Copy the token below (click the box to select all, then Cmd+C / Ctrl+C)</li>
+    <li>Open your <strong>Render dashboard</strong> → your web service → <strong>Environment</strong></li>
+    <li>Add a new variable: name = <code>GOOGLE_REFRESH_TOKEN</code>, value = the token</li>
+    <li>Click <strong>Save Changes</strong> — Render will redeploy automatically</li>
+    <li>Once redeployed, the app will stay connected without needing to sign in again</li>
+  </ol>
+  <div class="token-box" style="margin-top:0.75rem;">
+    <textarea id="rt" rows="3" readonly onclick="this.select()">${rt}</textarea>
+    <button class="copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('rt').value).then(()=>{this.textContent='Copied!';setTimeout(()=>this.textContent='Copy',2000)})">Copy</button>
+  </div>
+</div>
+<p style="font-size:12px;color:#888;">The app is already working in this browser session. The token above is only needed so it stays connected after Render restarts or redeploys.</p>
+`}
+
+<a href="/" class="btn">Open the app →</a>
+</div></body></html>`;
+}
 
 app.get('/auth/logout', (req, res) => {
   // Shared auth — nothing to clear server-side for workers
