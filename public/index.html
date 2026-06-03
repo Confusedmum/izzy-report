@@ -461,16 +461,16 @@ async function init() {
     console.log('[Izzy] Drive.init() succeeded — showing PIN screen');
     setMsg('Connected! Loading...', false);
 
-    // Use style.display directly — more reliable than classList across browsers
     const authEl  = document.getElementById('authScreen');
     const pinEl   = document.getElementById('pinScreen');
     const signBtn = document.getElementById('signOutBtn');
     console.log('[Izzy] authScreen:', !!authEl, 'pinScreen:', !!pinEl);
 
-    if (authEl)  authEl.style.display  = 'none';
+    // classList works correctly now that .section-hidden has !important
+    if (authEl)  authEl.classList.add('section-hidden');
     if (signBtn) signBtn.style.display = 'block';
-    if (pinEl)   pinEl.style.display   = 'flex';
-    console.log('[Izzy] PIN screen display set to flex');
+    if (pinEl)   pinEl.classList.remove('section-hidden');
+    console.log('[Izzy] PIN screen visible');
   } catch(e) {
     console.error('[Izzy] Drive.init() failed:', e.name, e.message);
     setMsg('Google Drive connection failed.', false);
