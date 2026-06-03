@@ -158,7 +158,7 @@ td { padding: 8px; vertical-align: top; }
 <header>
   <h1>Izzy Report Tool</h1>
   <div style="display:flex;align-items:center;gap:10px;">
-    <span class="mode-badge" id="modeBadge">Worker view</span>
+    <span class="mode-badge" id="modeBadge">SW View</span>
     <button id="signOutBtn" style="display:none;font-size:12px;padding:4px 10px;color:white;border-color:rgba(255,255,255,0.4);background:transparent;" onclick="signOut()">Sign out</button>
   </div>
 </header>
@@ -210,7 +210,7 @@ td { padding: 8px; vertical-align: top; }
       <div class="pill-group" id="budgetPills"></div>
     </div>
     <div id="connectError"></div>
-    <p class="note">Token goes directly to YNAB — never stored here.</p>
+    <p class="note" id="tokenNote">Token saved in your browser. <button id="forgetTokenBtn" onclick="clearSavedToken()" style="background:none;border:none;color:var(--accent);cursor:pointer;padding:0;font-size:12px;text-decoration:underline;font-family:var(--sans);">Forget</button></p>
   </div>
 
   <div class="card section-hidden" id="stepCategories">
@@ -242,7 +242,7 @@ td { padding: 8px; vertical-align: top; }
       </div>
       <div style="display:flex;gap:8px;" id="selectionActions">
         <button onclick="selectAll()">Select all</button>
-        <button onclick="clearAll()">Clear all</button>
+        <button id="clearAllBtn" onclick="clearAll()">Clear all</button>
       </div>
     </div>
     <div class="table-wrap">
@@ -388,6 +388,11 @@ console.log('[Izzy] App script block loading');
 // ─── Auth ─────────────────────────────────────────────────────────────────────
 function signIn() { window.location.href = '/auth/login'; }
 function signOut() { window.location.href = '/auth/logout'; }
+function clearSavedToken() {
+  localStorage.removeItem('ynab_token');
+  document.getElementById('token').value = '';
+  document.getElementById('tokenNote').innerHTML = 'Token cleared. Enter your token and load transactions to save again.';
+}
 
 // ─── App state ────────────────────────────────────────────────────────────────
 let isFullAccess = false;
@@ -491,10 +496,11 @@ function continueAsWorker() { isFullAccess = false; startApp(); }
 function startApp() {
   document.getElementById('pinScreen').classList.add('section-hidden');
   document.getElementById('appScreen').classList.remove('section-hidden');
-  document.getElementById('modeBadge').textContent = isFullAccess ? 'Full access' : 'Worker view';
-  ['stepCategories','stepRates','stepCash','stepGenerate'].forEach(id => {
+  document.getElementById('modeBadge').textContent = isFullAccess ? 'Full access' : 'SW View';
+  ['stepCategories','stepRates','stepGenerate'].forEach(id => {
     document.getElementById(id).classList.toggle('section-hidden', !isFullAccess);
   });
+  document.getElementById('stepCash').classList.remove('section-hidden');
   if (isFullAccess) {
     document.getElementById('budgetPillsWrap').classList.remove('section-hidden');
     document.getElementById('selectionActions').style.display = 'flex';
@@ -502,6 +508,13 @@ function startApp() {
   } else {
     document.getElementById('selectionActions').style.display = 'none';
     document.getElementById('selectedStat').style.display = 'none';
+    document.getElementById('clearAllBtn').style.display = 'none';
+  }
+  const savedToken = localStorage.getItem('ynab_token');
+  if (savedToken) {
+    document.getElementById('token').value = savedToken;
+  } else {
+    document.getElementById('tokenNote').innerHTML = 'Token not yet saved — will be remembered after first load.';
   }
   const now = new Date();
   const first = new Date(now.getFullYear(), now.getMonth(), 1);
@@ -540,6 +553,8 @@ async function loadTransactions() {
   errEl.innerHTML = '';
   if (!token) { errEl.innerHTML = '<div class="error-msg">Please enter your YNAB token.</div>'; return; }
   if (!from||!to) { errEl.innerHTML = '<div class="error-msg">Please select a date range.</div>'; return; }
+  localStorage.setItem('ynab_token', token);
+  document.getElementById('tokenNote').innerHTML = 'Token saved in your browser. <button id="forgetTokenBtn" onclick="clearSavedToken()" style="background:none;border:none;color:var(--accent);cursor:pointer;padding:0;font-size:12px;text-decoration:underline;font-family:var(--sans);">Forget</button>';
   showLoading('Loading transactions...');
   allTransactions = []; selectedIds = new Set(); selectedSubIds = new Set();
   const budgets = isFullAccess ? CONFIG.YNAB_BUDGETS : CONFIG.YNAB_BUDGETS.filter(b => b.workerAccess);
@@ -551,7 +566,7 @@ async function loadTransactions() {
       });
       const data = await res.json();
       if (!res.ok) { errors.push(`${budget.name}: ${data.error?.detail||'Error'}`); return []; }
-      return (data.data.transactions||[]).filter(tx=>tx.date<=to&&!tx.deleted&&tx.amount<0)
+      return (data.data.transactions||[]).filter(tx=>tx.date<=to&&!tx.deleted)
         .map(tx=>({...tx, budgetName:budget.name, currency:budget.currency}));
     } catch(e) { errors.push(`${budget.name}: Network error`); return []; }
   }));
