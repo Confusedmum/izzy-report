@@ -63,6 +63,73 @@ let driveStateFileId = null;
 let driveAppState    = { reportedTxIds: {}, categoryPrefs: null, receipts: {} };
 let driveInitPromise = null;
 
+// ─── Receipt folder cache ─────────────────────────────────────────────────────
+const RECEIPTS_FOLDER_NAME = 'Izzy Report Receipts';
+let driveReceiptsFolderId = null;
+const driveMonthFolderIds = {}; // { 'June 2026': 'folder-id', ... }
+
+const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+const MIME_EXT    = { 'image/jpeg':'.jpg','image/png':'.png','image/gif':'.gif','image/webp':'.webp','image/heic':'.heic','image/heif':'.heif' };
+
+function getMonthLabel(txDate) {
+  if (!txDate || !/^\d{4}-\d{2}-\d{2}$/.test(txDate)) return 'Unknown';
+  const [year, month] = txDate.split('-');
+  return `${MONTH_NAMES[parseInt(month, 10) - 1]} ${year}`;
+}
+
+function formatReceiptFilename(payee, txDate, mime) {
+  const clean = (payee || 'Unknown').replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim() || 'Unknown';
+  let datePart = '';
+  if (txDate && /^\d{4}-\d{2}-\d{2}$/.test(txDate)) {
+    const [year, month, day] = txDate.split('-');
+    datePart = `${day}${month}${year}`;
+  }
+  const ext = MIME_EXT[mime] || '';
+  return datePart ? `${clean} ${datePart}${ext}` : `${clean}${ext}`;
+}
+
+async function getOrCreateReceiptsFolder() {
+  if (driveReceiptsFolderId) return driveReceiptsFolderId;
+  const q = encodeURIComponent(
+    `name='${RECEIPTS_FOLDER_NAME}' and mimeType='application/vnd.google-apps.folder' and trashed=false`
+  );
+  const data = await driveFetchJson(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id)`);
+  if (data.files?.length > 0) {
+    driveReceiptsFolderId = data.files[0].id;
+    console.log('Found receipts folder:', driveReceiptsFolderId);
+  } else {
+    const created = await driveFetchJson('https://www.googleapis.com/drive/v3/files?fields=id', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: RECEIPTS_FOLDER_NAME, mimeType: 'application/vnd.google-apps.folder' }),
+    });
+    driveReceiptsFolderId = created.id;
+    console.log('Created receipts folder:', driveReceiptsFolderId);
+  }
+  return driveReceiptsFolderId;
+}
+
+async function getOrCreateMonthFolder(parentId, monthLabel) {
+  if (driveMonthFolderIds[monthLabel]) return driveMonthFolderIds[monthLabel];
+  const q = encodeURIComponent(
+    `name='${monthLabel}' and '${parentId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`
+  );
+  const data = await driveFetchJson(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id)`);
+  if (data.files?.length > 0) {
+    driveMonthFolderIds[monthLabel] = data.files[0].id;
+    console.log(`Found month folder "${monthLabel}":`, driveMonthFolderIds[monthLabel]);
+  } else {
+    const created = await driveFetchJson('https://www.googleapis.com/drive/v3/files?fields=id', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: monthLabel, mimeType: 'application/vnd.google-apps.folder', parents: [parentId] }),
+    });
+    driveMonthFolderIds[monthLabel] = created.id;
+    console.log(`Created month folder "${monthLabel}":`, driveMonthFolderIds[monthLabel]);
+  }
+  return driveMonthFolderIds[monthLabel];
+}
+
 async function getDriveFolder() {
   if (driveFolderId) return driveFolderId;
 
@@ -282,25 +349,35 @@ app.post('/api/drive/receipt/:txId', requireDrive, async (req, res) => {
   try {
     await ensureDriveReady();
     const { txId } = req.params;
-    const { dataUrl, filename } = req.body;
+    const { dataUrl, payee, txDate } = req.body;
 
     const [header, b64] = dataUrl.split(',');
     const mime = header.split(':')[1].split(';')[0];
     const buf  = Buffer.from(b64, 'base64');
-    const folderId = await getDriveFolder();
-    const existingId = driveAppState.receipts?.[txId]?.fileId;
 
+    const receiptFilename = formatReceiptFilename(payee, txDate, mime);
+    const monthLabel      = getMonthLabel(txDate);
+    const receiptsFolderId = await getOrCreateReceiptsFolder();
+    const monthFolderId    = await getOrCreateMonthFolder(receiptsFolderId, monthLabel);
+
+    const existingId = driveAppState.receipts?.[txId]?.fileId;
     let fileId;
     if (existingId) {
+      // Update file content
       await driveFetch(
         `https://www.googleapis.com/upload/drive/v3/files/${existingId}?uploadType=media`,
         { method: 'PATCH', headers: { 'Content-Type': mime }, body: buf }
+      );
+      // Update filename in metadata
+      await driveFetchJson(
+        `https://www.googleapis.com/drive/v3/files/${existingId}?fields=id`,
+        { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: receiptFilename }) }
       );
       fileId = existingId;
     } else {
       const form = new FormData();
       form.append('metadata', new Blob(
-        [JSON.stringify({ name: `receipt_${txId}_${filename}`, parents: [folderId] })],
+        [JSON.stringify({ name: receiptFilename, parents: [monthFolderId] })],
         { type: 'application/json' }
       ));
       form.append('file', new Blob([buf], { type: mime }));
@@ -312,9 +389,9 @@ app.post('/api/drive/receipt/:txId', requireDrive, async (req, res) => {
     }
 
     if (!driveAppState.receipts) driveAppState.receipts = {};
-    driveAppState.receipts[txId] = { fileId, filename, mime };
+    driveAppState.receipts[txId] = { fileId, filename: receiptFilename, mime };
     await saveState();
-    res.json({ fileId });
+    res.json({ fileId, filename: receiptFilename });
   } catch (e) {
     console.error('Receipt upload error:', e.message);
     res.status(500).json({ error: e.message });

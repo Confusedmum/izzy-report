@@ -343,16 +343,16 @@ const Drive = {
     return this._saveState();
   },
 
-  async uploadReceipt(txId, dataUrl, filename) {
+  async uploadReceipt(txId, dataUrl, filename, payee, txDate) {
     const res = await fetch('/api/drive/receipt/' + txId, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ dataUrl, filename }),
+      body: JSON.stringify({ dataUrl, filename, payee, txDate }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Upload failed');
     if (!this.state.receipts) this.state.receipts = {};
-    this.state.receipts[txId] = { fileId: data.fileId, filename };
+    this.state.receipts[txId] = { fileId: data.fileId, filename: data.filename || filename };
   },
 
   async deleteReceipt(txId) {
@@ -405,6 +405,7 @@ let activeCategories = null;
 let allCategories = [];
 let cashIdCounter = 0;
 let modalTxId = null;
+let modalPayee = null;
 let modalPendingDataUrl = null;
 let modalPendingFilename = null;
 
@@ -699,7 +700,7 @@ function updateSummary() {
 
 // ─── Receipt modal ────────────────────────────────────────────────────────────
 function openReceiptModal(txId, payee, hasExisting) {
-  modalTxId=txId; modalPendingDataUrl=null; modalPendingFilename=null;
+  modalTxId=txId; modalPayee=payee; modalPendingDataUrl=null; modalPendingFilename=null;
   document.getElementById('modalTitle').textContent = 'Receipt — '+payee;
   document.getElementById('modalSaveBtn').disabled = true;
   document.getElementById('modalPreview').style.display = 'none';
@@ -725,7 +726,9 @@ function handleModalFile(file) {
 async function saveModalReceipt() {
   if (!modalTxId||!modalPendingDataUrl) return;
   showLoading('Saving receipt to Drive...');
-  try { await Drive.uploadReceipt(modalTxId, modalPendingDataUrl, modalPendingFilename); hideLoading(); closeReceiptModal(); renderTable(); }
+  const tx = allTransactions.find(t => t.id === modalTxId);
+  const txDate = tx?.date || '';
+  try { await Drive.uploadReceipt(modalTxId, modalPendingDataUrl, modalPendingFilename, modalPayee||'', txDate); hideLoading(); closeReceiptModal(); renderTable(); }
   catch(e) { hideLoading(); alert('Error saving receipt: '+e.message); }
 }
 async function removeCurrentReceipt() {
