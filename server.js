@@ -26,16 +26,29 @@ if (process.env.GOOGLE_REFRESH_TOKEN) {
   googleReady = true;
 }
 
-// Get a fresh access token — oauthClient handles refresh automatically
+// Get a fresh access token — oauthClient handles refresh automatically.
+// If the refresh token itself is invalid (invalid_grant), mark Drive as
+// unconfigured so the admin is prompted to re-auth rather than retrying forever.
 async function getToken() {
-  const { token } = await oauthClient.getAccessToken();
-  if (!token) throw new Error('Could not get access token. Check GOOGLE_REFRESH_TOKEN env var.');
-  return token;
+  try {
+    const { token } = await oauthClient.getAccessToken();
+    if (!token) throw new Error('Could not get access token. Check GOOGLE_REFRESH_TOKEN env var.');
+    return token;
+  } catch (e) {
+    const msg = (e.message || '') + JSON.stringify(e.response?.data || {});
+    if (msg.includes('invalid_grant') || msg.includes('Token has been expired or revoked')) {
+      googleReady = false;
+      driveInitPromise = null;
+      console.error('Refresh token is invalid — admin must reconnect at /auth/login');
+      throw new Error('Google Drive authorization has expired. An admin must visit /auth/login to reconnect.');
+    }
+    throw e;
+  }
 }
 
-// Drive fetch helper — uses fetch() with a timeout, same as the confirmed-working
-// /api/drive/test endpoint. All Drive API calls go through here.
-async function driveFetch(url, opts = {}) {
+// Drive fetch helper — uses fetch() with a timeout. On a 401 (access token
+// expired mid-flight) it forces a token refresh and retries once before giving up.
+async function driveFetch(url, opts = {}, _retried = false) {
   const token = await getToken();
   const res = await fetch(url, {
     ...opts,
@@ -45,6 +58,24 @@ async function driveFetch(url, opts = {}) {
     },
     signal: AbortSignal.timeout(TIMEOUT_MS),
   });
+
+  if (res.status === 401 && !_retried) {
+    console.log('Drive API returned 401 — forcing token refresh and retrying...');
+    try {
+      await oauthClient.refreshAccessToken();
+    } catch (e) {
+      const msg = (e.message || '') + JSON.stringify(e.response?.data || {});
+      if (msg.includes('invalid_grant') || msg.includes('Token has been expired or revoked')) {
+        googleReady = false;
+        driveInitPromise = null;
+        console.error('Refresh token rejected during 401 retry — admin must reconnect at /auth/login');
+        throw new Error('Google Drive authorization has expired. An admin must visit /auth/login to reconnect.');
+      }
+      throw e;
+    }
+    return driveFetch(url, opts, true);
+  }
+
   if (!res.ok) {
     const text = await res.text().catch(() => res.status.toString());
     throw new Error(`Drive API ${res.status}: ${text}`);
