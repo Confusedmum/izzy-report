@@ -126,7 +126,7 @@ async function getOrCreateReceiptsFolder() {
   const q = encodeURIComponent(
     `name='${RECEIPTS_FOLDER_NAME}' and mimeType='application/vnd.google-apps.folder' and trashed=false`
   );
-  const data = await driveFetchJson(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id)`);
+  const data = await driveFetchJson(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id)&orderBy=createdTime+asc`);
   if (data.files?.length > 0) {
     driveReceiptsFolderId = data.files[0].id;
     console.log('Found receipts folder:', driveReceiptsFolderId);
@@ -147,7 +147,7 @@ async function getOrCreateMonthFolder(parentId, monthLabel) {
   const q = encodeURIComponent(
     `name='${monthLabel}' and '${parentId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`
   );
-  const data = await driveFetchJson(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id)`);
+  const data = await driveFetchJson(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id)&orderBy=createdTime+asc`);
   if (data.files?.length > 0) {
     driveMonthFolderIds[monthLabel] = data.files[0].id;
     console.log(`Found month folder "${monthLabel}":`, driveMonthFolderIds[monthLabel]);
@@ -225,7 +225,7 @@ async function getDriveFolder() {
     `name='${FOLDER_NAME}' and mimeType='application/vnd.google-apps.folder' and trashed=false`
   );
   const data = await driveFetchJson(
-    `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id)`
+    `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id)&orderBy=createdTime+asc`
   );
 
   if (data.files?.length > 0) {
@@ -247,7 +247,7 @@ async function loadState() {
   const folderId = await getDriveFolder();
   const q = encodeURIComponent(`name='state.json' and '${folderId}' in parents and trashed=false`);
   const data = await driveFetchJson(
-    `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id)`
+    `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id)&orderBy=modifiedTime+desc`
   );
 
   if (!data.files?.length) { driveStateFileId = null; return; }
@@ -429,13 +429,35 @@ app.get('/api/drive/init', requireDrive, async (req, res) => {
 app.post('/api/drive/state', requireDrive, async (req, res) => {
   try {
     await ensureDriveReady();
-    driveAppState = req.body;
+    // Only accept reportedTxIds and categoryPrefs from the client.
+    // Receipts are managed exclusively by the receipt upload/delete endpoints
+    // and must not be overwritten by a client state-sync that may have a stale
+    // view of receipts (e.g. loaded before a receipt was uploaded this session).
+    const { reportedTxIds, categoryPrefs } = req.body;
+    driveAppState = {
+      ...driveAppState,
+      ...(reportedTxIds !== undefined && { reportedTxIds }),
+      ...(categoryPrefs !== undefined && { categoryPrefs }),
+    };
     await saveState();
     res.json({ ok: true });
   } catch (e) {
     console.error('Save state error:', e.message);
     res.status(500).json({ error: e.message });
   }
+});
+
+app.get('/api/debug/state', (req, res) => {
+  res.json({
+    googleReady,
+    driveFolderId,
+    driveStateFileId,
+    receiptsCount: Object.keys(driveAppState.receipts || {}).length,
+    receiptTxIds: Object.keys(driveAppState.receipts || {}),
+    reportedTxCount: Object.keys(driveAppState.reportedTxIds || {}).length,
+    hasCategoryPrefs: !!driveAppState.categoryPrefs,
+    categoryPrefCount: driveAppState.categoryPrefs?.length ?? 0,
+  });
 });
 
 app.post('/api/drive/receipt/:txId', requireDrive, async (req, res) => {

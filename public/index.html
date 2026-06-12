@@ -583,8 +583,10 @@ async function loadTransactions() {
       });
       const data = await res.json();
       if (!res.ok) { errors.push(`${budget.name}: ${data.error?.detail||'Error'}`); return []; }
-      return (data.data.transactions||[]).filter(tx=>tx.date<=to&&!tx.deleted)
-        .map(tx=>({...tx, budgetName:budget.name, currency:budget.currency}));
+      const all = data.data.transactions||[];
+      const filtered = all.filter(tx=>tx.date<=to&&!tx.deleted);
+      if (all.length !== filtered.length) console.log(`${budget.name}: ${all.length} from YNAB, ${filtered.length} after date/deleted filter`);
+      return filtered.map(tx=>({...tx, budgetName:budget.name, currency:budget.currency}));
     } catch(e) { errors.push(`${budget.name}: Network error`); return []; }
   }));
   hideLoading();
@@ -636,6 +638,8 @@ function sym(c) { return c==='EUR'?'€':c==='USD'?'$':'£'; }
 function getFilteredTxs() {
   return allTransactions.filter(tx => {
     if (!activeBudgets.has(CONFIG.YNAB_BUDGETS.find(b=>b.name===tx.budgetName)?.id)) return false;
+    // Category filter only applies in full-access mode; SW View shows all transactions
+    if (!isFullAccess) return true;
     if (activeCategories && tx.subtransactions?.length) return tx.subtransactions.some(s=>activeCategories.has(s.category_name));
     if (activeCategories && !tx.subtransactions?.length) return activeCategories.has(tx.category_name);
     return true;
