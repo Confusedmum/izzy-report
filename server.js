@@ -161,6 +161,61 @@ async function getOrCreateMonthFolder(parentId, monthLabel) {
   return driveMonthFolderIds[monthLabel];
 }
 
+// ─── Revolut Google Sheet ──────────────────────────────────────────────────────
+const REVOLUT_SHEET_NAME = 'Revolut Reimbursement 2026';
+let revolutSheetId = null;
+
+async function getOrCreateRevolutSheet() {
+  if (revolutSheetId) return revolutSheetId;
+  const receiptsFolderId = await getOrCreateReceiptsFolder();
+  const q = encodeURIComponent(
+    `name='${REVOLUT_SHEET_NAME}' and '${receiptsFolderId}' in parents and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false`
+  );
+  const data = await driveFetchJson(
+    `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id)`
+  );
+  if (data.files?.length > 0) {
+    revolutSheetId = data.files[0].id;
+    console.log('Found Revolut sheet:', revolutSheetId);
+  } else {
+    const created = await driveFetchJson(
+      'https://www.googleapis.com/drive/v3/files?fields=id',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: REVOLUT_SHEET_NAME,
+          mimeType: 'application/vnd.google-apps.spreadsheet',
+          parents: [receiptsFolderId],
+        }),
+      }
+    );
+    revolutSheetId = created.id;
+    console.log('Created Revolut sheet:', revolutSheetId);
+  }
+  return revolutSheetId;
+}
+
+async function getOrCreateSheetTab(spreadsheetId, tabTitle) {
+  const data = await driveFetchJson(
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?fields=sheets.properties`
+  );
+  const existing = data.sheets?.find(s => s.properties.title === tabTitle);
+  if (existing) return existing.properties.sheetId;
+
+  const result = await driveFetchJson(
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        requests: [{ addSheet: { properties: { title: tabTitle } } }],
+      }),
+    }
+  );
+  return result.replies[0].addSheet.properties.sheetId;
+}
+
 async function getDriveFolder() {
   if (driveFolderId) return driveFolderId;
 
@@ -257,7 +312,12 @@ app.use(session({
 app.use(express.json({ limit: '15mb' }));
 
 // ─── Auth routes ───────────────────────────────────────────────────────────────
-const SCOPES = ['https://www.googleapis.com/auth/drive.file'];
+// NOTE: spreadsheets scope was added later — existing refresh tokens won't have
+// it. The admin must re-auth at /auth/login once to get a new token.
+const SCOPES = [
+  'https://www.googleapis.com/auth/drive.file',
+  'https://www.googleapis.com/auth/spreadsheets',
+];
 
 app.get('/auth/login', (req, res) => {
   const client = makeOAuthClient();
@@ -493,6 +553,71 @@ app.get('/api/drive/test', requireDrive, async (req, res) => {
     const data = await driveFetchJson('https://www.googleapis.com/drive/v3/about?fields=user');
     res.json({ ok: true, user: data.user });
   } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── Revolut Summary → Google Sheet ───────────────────────────────────────────
+// Body: { month: "June 2026", rows: [{ values: [...], bold: bool }, ...] }
+// Finds/creates the spreadsheet in the Receipts folder, finds/creates the month
+// tab, appends all rows, then batch-formats the bold ones.
+app.post('/api/sheets/revolut-summary', requireDrive, async (req, res) => {
+  try {
+    const { month, rows } = req.body;
+    if (!month || !Array.isArray(rows) || !rows.length) {
+      return res.status(400).json({ error: 'month and rows are required' });
+    }
+
+    const spreadsheetId = await getOrCreateRevolutSheet();
+    const sheetId       = await getOrCreateSheetTab(spreadsheetId, month);
+
+    // Count existing rows so we know where new data starts (for bold offsets)
+    const existing = await driveFetchJson(
+      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(month)}?fields=values`
+    ).catch(() => ({ values: [] }));
+    const startRowIndex = existing.values?.length || 0;
+
+    // Append all row values in one call
+    await driveFetchJson(
+      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(month)}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ values: rows.map(r => r.values) }),
+      }
+    );
+
+    // Apply bold formatting to rows flagged bold
+    const boldRequests = rows
+      .map((row, i) => row.bold ? {
+        repeatCell: {
+          range: {
+            sheetId,
+            startRowIndex: startRowIndex + i,
+            endRowIndex:   startRowIndex + i + 1,
+          },
+          cell: { userEnteredFormat: { textFormat: { bold: true } } },
+          fields: 'userEnteredFormat.textFormat.bold',
+        },
+      } : null)
+      .filter(Boolean);
+
+    if (boldRequests.length) {
+      await driveFetchJson(
+        `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ requests: boldRequests }),
+        }
+      );
+    }
+
+    const url = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit#gid=${sheetId}`;
+    console.log(`Revolut summary written to "${month}" tab`);
+    res.json({ ok: true, url });
+  } catch (e) {
+    console.error('Revolut summary error:', e.message);
     res.status(500).json({ error: e.message });
   }
 });

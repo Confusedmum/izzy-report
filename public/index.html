@@ -292,6 +292,17 @@ td { padding: 8px; vertical-align: top; }
     <div id="generateMsg"></div>
   </div>
 
+  <div class="card section-hidden" id="stepRevolut">
+    <div class="card-title">Revolut summary</div>
+    <p style="font-size:12px;color:var(--text-2);margin-bottom:12px;">Pulls Revolut GBP, EUR &amp; USD from YNAB, groups by category, and appends to <em>Revolut Reimbursement 2026</em> in Google Drive (inside the Receipts folder). One tab per month — runs append into existing tab.</p>
+    <div class="row" style="gap:12px;margin-bottom:12px;">
+      <div class="field"><label>From</label><input type="date" id="revolutFrom"/></div>
+      <div class="field"><label>To</label><input type="date" id="revolutTo"/></div>
+    </div>
+    <button class="primary" onclick="generateRevolutSummary()">Generate Summary</button>
+    <div id="revolutMsg" style="margin-top:8px;"></div>
+  </div>
+
 </div>
 </div>
 
@@ -498,7 +509,7 @@ function startApp() {
   document.getElementById('pinScreen').classList.add('section-hidden');
   document.getElementById('appScreen').classList.remove('section-hidden');
   document.getElementById('modeBadge').textContent = isFullAccess ? 'Full access' : 'SW View';
-  ['stepCategories','stepRates','stepGenerate'].forEach(id => {
+  ['stepCategories','stepRates','stepGenerate','stepRevolut'].forEach(id => {
     document.getElementById(id).classList.toggle('section-hidden', !isFullAccess);
   });
   document.getElementById('stepCash').classList.remove('section-hidden');
@@ -520,8 +531,12 @@ function startApp() {
   }
   const now = new Date();
   const first = new Date(now.getFullYear(), now.getMonth(), 1);
-  document.getElementById('dateFrom').value = first.toISOString().split('T')[0];
-  document.getElementById('dateTo').value = now.toISOString().split('T')[0];
+  const firstStr = first.toISOString().split('T')[0];
+  const todayStr = now.toISOString().split('T')[0];
+  document.getElementById('dateFrom').value = firstStr;
+  document.getElementById('dateTo').value = todayStr;
+  document.getElementById('revolutFrom').value = firstStr;
+  document.getElementById('revolutTo').value = todayStr;
   const budgets = isFullAccess ? CONFIG.YNAB_BUDGETS : CONFIG.YNAB_BUDGETS.filter(b => b.workerAccess);
   budgets.forEach(b => activeBudgets.add(b.id));
   renderPills();
@@ -853,6 +868,178 @@ function buildReportRows() {
   cashTransactions.filter(c=>selectedIds.has(c.id)).forEach(c=>{
     rows.push({budget:'Cash',date:c.date,payee:c.payee_name,category:c.category_name||'—',memo:c.memo||'',amount:`£${Math.abs(c.amount/1000).toFixed(2)}`});
   });
+  return rows;
+}
+
+// ─── Revolut Summary ──────────────────────────────────────────────────────────
+const REVOLUT_BUDGETS = [
+  { id: '0510517f-e87b-4e51-829c-5a97cd7d88ef', name: 'Revolut GBP', currency: 'GBP' },
+  { id: 'd58daf8b-4851-4d4e-be10-b14eb7d5c9fd', name: 'Revolut EUR', currency: 'EUR' },
+  { id: '15d6c416-93fe-4a48-8c6a-2fb0d696bcd1', name: 'Revolut USD', currency: 'USD' },
+];
+const MONTH_NAMES_REV = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+
+async function generateRevolutSummary() {
+  const token  = document.getElementById('token').value.trim();
+  const from   = document.getElementById('revolutFrom').value;
+  const to     = document.getElementById('revolutTo').value;
+  const msgEl  = document.getElementById('revolutMsg');
+  msgEl.innerHTML = '';
+
+  if (!token) { msgEl.innerHTML = '<div class="error-msg">No YNAB token — enter it in the Connect section above.</div>'; return; }
+  if (!from || !to) { msgEl.innerHTML = '<div class="error-msg">Please select a date range.</div>'; return; }
+
+  showLoading('Loading Revolut transactions from YNAB...');
+  try {
+    const results = await Promise.all(REVOLUT_BUDGETS.map(async b => {
+      const res  = await fetch(`https://api.ynab.com/v1/budgets/${b.id}/transactions?since_date=${from}`, {
+        headers: { Authorization: 'Bearer ' + token }
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(`${b.name}: ${data.error?.detail || 'YNAB error'}`);
+      const txs = (data.data.transactions || []).filter(tx => tx.date <= to && !tx.deleted);
+      return { budget: b, txs };
+    }));
+
+    const [yr, mo] = from.split('-');
+    const monthLabel = `${MONTH_NAMES_REV[parseInt(mo, 10) - 1]} ${yr}`;
+
+    showLoading('Writing to Google Sheets...');
+    const rows = buildRevolutRows(results, monthLabel);
+
+    const res  = await fetch('/api/sheets/revolut-summary', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ month: monthLabel, rows }),
+    });
+    const data = await res.json();
+    hideLoading();
+    if (!res.ok) throw new Error(data.error || 'Sheet write failed');
+    msgEl.innerHTML = `<div class="success-msg">Done! <a href="${data.url}" target="_blank" style="color:var(--accent);font-weight:500;">Open in Sheets →</a></div>`;
+  } catch (e) {
+    hideLoading();
+    msgEl.innerHTML = `<div class="error-msg">Error: ${e.message}</div>`;
+  }
+}
+
+function buildRevolutRows(results, monthLabel) {
+  const rows = [];
+
+  // Flatten splits so each subtransaction is categorised individually
+  function flattenTxs(txs) {
+    const out = [];
+    txs.forEach(tx => {
+      if (tx.subtransactions?.length > 0) {
+        tx.subtransactions.forEach(sub => {
+          if (sub.amount >= 0) return; // skip inflows within splits
+          out.push({ date: tx.date, payee_name: tx.payee_name, memo: sub.memo || tx.memo,
+                     category_name: sub.category_name || tx.category_name, amount: sub.amount });
+        });
+      } else if (tx.amount < 0) {
+        out.push(tx);
+      }
+    });
+    return out;
+  }
+
+  function addSection(sectionTitle, txList, totalLabel, sym) {
+    rows.push({ values: [sectionTitle], bold: true });
+    rows.push({ values: ['Date', 'Payee', 'Category', 'Amount'], bold: true });
+
+    // Group by category, sorted alphabetically
+    const byCat = {};
+    txList.forEach(tx => {
+      const cat = tx.category_name || 'Uncategorised';
+      (byCat[cat] = byCat[cat] || []).push(tx);
+    });
+
+    let grandTotal = 0;
+    Object.keys(byCat).sort().forEach(cat => {
+      const catTxs = byCat[cat];
+      catTxs.forEach(tx => {
+        const amt = Math.abs(tx.amount / 1000);
+        grandTotal += amt;
+        rows.push({ values: [tx.date, tx.payee_name || '—', tx.category_name || '—', sym + amt.toFixed(2)], bold: false });
+      });
+      const catTotal = catTxs.reduce((s, tx) => s + Math.abs(tx.amount / 1000), 0);
+      rows.push({ values: ['', '', cat + ' subtotal', sym + catTotal.toFixed(2)], bold: true });
+    });
+
+    rows.push({ values: [] });
+    rows.push({ values: [totalLabel, '', '', sym + grandTotal.toFixed(2)], bold: true });
+    rows.push({ values: [] });
+  }
+
+  // ── Revolut GBP ──────────────────────────────────────────────────────────────
+  const gbpResult = results.find(r => r.budget.currency === 'GBP');
+  if (gbpResult) {
+    rows.push({ values: [`Revolut GBP — ${monthLabel}`], bold: true });
+    rows.push({ values: [] });
+
+    const flat = flattenTxs(gbpResult.txs);
+    const isStarling = tx => (tx.category_name || '').toLowerCase().includes('reimburse from starling');
+    const isNatwest  = tx => (tx.category_name || '').toLowerCase().includes('reimburse from natwest');
+
+    addSection('Transfer from First Direct',
+      flat.filter(tx => !isStarling(tx) && !isNatwest(tx)),
+      'Transfer from First Direct to Revolut GBP:', '£');
+    addSection('Reimburse from Starling',
+      flat.filter(isStarling),
+      'Reimburse from Starling:', '£');
+    addSection('Reimburse from Natwest',
+      flat.filter(isNatwest),
+      'Reimburse from Natwest:', '£');
+  }
+
+  // ── Revolut EUR ──────────────────────────────────────────────────────────────
+  const eurResult = results.find(r => r.budget.currency === 'EUR');
+  if (eurResult) {
+    rows.push({ values: [`Revolut EUR — ${monthLabel}`], bold: true });
+    rows.push({ values: [] });
+    rows.push({ values: ['Date', 'Payee', 'Category', 'Amount'], bold: true });
+
+    const flat = flattenTxs(eurResult.txs);
+    const byCat = {};
+    flat.forEach(tx => { const cat = tx.category_name || 'Uncategorised'; (byCat[cat] = byCat[cat] || []).push(tx); });
+    let total = 0;
+    Object.keys(byCat).sort().forEach(cat => {
+      byCat[cat].forEach(tx => {
+        const amt = Math.abs(tx.amount / 1000); total += amt;
+        rows.push({ values: [tx.date, tx.payee_name || '—', tx.category_name || '—', '€' + amt.toFixed(2)], bold: false });
+      });
+      const catTotal = byCat[cat].reduce((s, tx) => s + Math.abs(tx.amount / 1000), 0);
+      rows.push({ values: ['', '', cat + ' subtotal', '€' + catTotal.toFixed(2)], bold: true });
+    });
+    rows.push({ values: [] });
+    rows.push({ values: ['Transfer manually based on current exchange rate'], bold: false });
+    rows.push({ values: ['Total:', '', '', '€' + total.toFixed(2)], bold: true });
+    rows.push({ values: [] });
+  }
+
+  // ── Revolut USD ──────────────────────────────────────────────────────────────
+  const usdResult = results.find(r => r.budget.currency === 'USD');
+  if (usdResult) {
+    rows.push({ values: [`Revolut USD — ${monthLabel}`], bold: true });
+    rows.push({ values: [] });
+    rows.push({ values: ['Date', 'Payee', 'Category', 'Amount'], bold: true });
+
+    const flat = flattenTxs(usdResult.txs);
+    const byCat = {};
+    flat.forEach(tx => { const cat = tx.category_name || 'Uncategorised'; (byCat[cat] = byCat[cat] || []).push(tx); });
+    let total = 0;
+    Object.keys(byCat).sort().forEach(cat => {
+      byCat[cat].forEach(tx => {
+        const amt = Math.abs(tx.amount / 1000); total += amt;
+        rows.push({ values: [tx.date, tx.payee_name || '—', tx.category_name || '—', '$' + amt.toFixed(2)], bold: false });
+      });
+      const catTotal = byCat[cat].reduce((s, tx) => s + Math.abs(tx.amount / 1000), 0);
+      rows.push({ values: ['', '', cat + ' subtotal', '$' + catTotal.toFixed(2)], bold: true });
+    });
+    rows.push({ values: [] });
+    rows.push({ values: ['Transfer manually based on current exchange rate'], bold: false });
+    rows.push({ values: ['Total:', '', '', '$' + total.toFixed(2)], bold: true });
+  }
+
   return rows;
 }
 
