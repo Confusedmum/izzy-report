@@ -944,7 +944,8 @@ function buildRevolutRows(results, monthLabel) {
 
   function addSection(sectionTitle, txList, totalLabel, sym) {
     rows.push({ values: [sectionTitle], bold: true });
-    rows.push({ values: ['Date', 'Payee', 'Category', 'Amount'], bold: true });
+    // A=Date  B=Payee  C=Category  D=Memo  E=Amount  F=Subtotal
+    rows.push({ values: ['Date', 'Payee', 'Category', 'Memo', 'Amount', 'Subtotal'], bold: true });
 
     // Group by category, sorted alphabetically
     const byCat = {};
@@ -959,14 +960,17 @@ function buildRevolutRows(results, monthLabel) {
       catTxs.forEach(tx => {
         const amt = Math.abs(tx.amount / 1000);
         grandTotal += amt;
-        rows.push({ values: [tx.date, tx.payee_name || '—', tx.category_name || '—', sym + amt.toFixed(2)], bold: false });
+        // Individual tx: amount in col E, col F blank
+        rows.push({ values: [tx.date, tx.payee_name || '—', tx.category_name || '—', tx.memo || '', sym + amt.toFixed(2), ''], bold: false });
       });
       const catTotal = catTxs.reduce((s, tx) => s + Math.abs(tx.amount / 1000), 0);
-      rows.push({ values: ['', '', cat + ' subtotal', sym + catTotal.toFixed(2)], bold: true });
+      // Category subtotal: cols A-E blank/label, subtotal in col F
+      rows.push({ values: ['', '', cat + ' subtotal', '', '', sym + catTotal.toFixed(2)], bold: true });
     });
 
     rows.push({ values: [] });
-    rows.push({ values: [totalLabel, '', '', sym + grandTotal.toFixed(2)], bold: true });
+    // Grand total: label in col A, total in col F
+    rows.push({ values: [totalLabel, '', '', '', '', sym + grandTotal.toFixed(2)], bold: true });
     rows.push({ values: [] });
   }
 
@@ -996,7 +1000,7 @@ function buildRevolutRows(results, monthLabel) {
   if (eurResult) {
     rows.push({ values: [`Revolut EUR — ${monthLabel}`], bold: true });
     rows.push({ values: [] });
-    rows.push({ values: ['Date', 'Payee', 'Category', 'Amount'], bold: true });
+    rows.push({ values: ['Date', 'Payee', 'Category', 'Memo', 'Amount', 'Subtotal'], bold: true });
 
     const flat = flattenTxs(eurResult.txs);
     const byCat = {};
@@ -1005,14 +1009,14 @@ function buildRevolutRows(results, monthLabel) {
     Object.keys(byCat).sort().forEach(cat => {
       byCat[cat].forEach(tx => {
         const amt = Math.abs(tx.amount / 1000); total += amt;
-        rows.push({ values: [tx.date, tx.payee_name || '—', tx.category_name || '—', '€' + amt.toFixed(2)], bold: false });
+        rows.push({ values: [tx.date, tx.payee_name || '—', tx.category_name || '—', tx.memo || '', '€' + amt.toFixed(2), ''], bold: false });
       });
       const catTotal = byCat[cat].reduce((s, tx) => s + Math.abs(tx.amount / 1000), 0);
-      rows.push({ values: ['', '', cat + ' subtotal', '€' + catTotal.toFixed(2)], bold: true });
+      rows.push({ values: ['', '', cat + ' subtotal', '', '', '€' + catTotal.toFixed(2)], bold: true });
     });
     rows.push({ values: [] });
     rows.push({ values: ['Transfer manually based on current exchange rate'], bold: false });
-    rows.push({ values: ['Total:', '', '', '€' + total.toFixed(2)], bold: true });
+    rows.push({ values: ['Total:', '', '', '', '', '€' + total.toFixed(2)], bold: true });
     rows.push({ values: [] });
   }
 
@@ -1021,7 +1025,7 @@ function buildRevolutRows(results, monthLabel) {
   if (usdResult) {
     rows.push({ values: [`Revolut USD — ${monthLabel}`], bold: true });
     rows.push({ values: [] });
-    rows.push({ values: ['Date', 'Payee', 'Category', 'Amount'], bold: true });
+    rows.push({ values: ['Date', 'Payee', 'Category', 'Memo', 'Amount', 'Subtotal'], bold: true });
 
     const flat = flattenTxs(usdResult.txs);
     const byCat = {};
@@ -1030,14 +1034,14 @@ function buildRevolutRows(results, monthLabel) {
     Object.keys(byCat).sort().forEach(cat => {
       byCat[cat].forEach(tx => {
         const amt = Math.abs(tx.amount / 1000); total += amt;
-        rows.push({ values: [tx.date, tx.payee_name || '—', tx.category_name || '—', '$' + amt.toFixed(2)], bold: false });
+        rows.push({ values: [tx.date, tx.payee_name || '—', tx.category_name || '—', tx.memo || '', '$' + amt.toFixed(2), ''], bold: false });
       });
       const catTotal = byCat[cat].reduce((s, tx) => s + Math.abs(tx.amount / 1000), 0);
-      rows.push({ values: ['', '', cat + ' subtotal', '$' + catTotal.toFixed(2)], bold: true });
+      rows.push({ values: ['', '', cat + ' subtotal', '', '', '$' + catTotal.toFixed(2)], bold: true });
     });
     rows.push({ values: [] });
     rows.push({ values: ['Transfer manually based on current exchange rate'], bold: false });
-    rows.push({ values: ['Total:', '', '', '$' + total.toFixed(2)], bold: true });
+    rows.push({ values: ['Total:', '', '', '', '', '$' + total.toFixed(2)], bold: true });
   }
 
   return rows;
