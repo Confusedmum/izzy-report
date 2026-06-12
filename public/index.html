@@ -286,7 +286,7 @@ td { padding: 8px; vertical-align: top; }
     </div>
     <div class="export-row">
       <button class="primary" onclick="exportCSV()">⬇ Download CSV</button>
-      <button class="primary" onclick="generateReceiptDoc()">📄 Create receipt Google Doc</button>
+      <button class="primary" onclick="generateReceiptPDF()">📄 Generate Receipt PDF</button>
     </div>
     <p class="note">CSV = transaction table · Google Doc = receipt annex saved to your Drive</p>
     <div id="generateMsg"></div>
@@ -817,32 +817,25 @@ function exportCSV() {
 }
 
 // ─── Receipt Google Doc ───────────────────────────────────────────────────────
-async function generateReceiptDoc() {
+async function generateReceiptPDF() {
   const period=document.getElementById('reportPeriod').value||'Report';
   const msgEl=document.getElementById('generateMsg'); msgEl.innerHTML='';
   const filtered=getFilteredTxs();
-  const receiptTxIds=[];
+  const entries=[];
   filtered.forEach(tx=>{
     const isSplit=tx.subtransactions?.length>0;
-    if (isSplit) { if(tx.subtransactions.some(s=>selectedSubIds.has(`${tx.id}::${s.id}`))&&Drive.state.receipts[tx.id]) receiptTxIds.push(tx.id); }
-    else { if(selectedIds.has(tx.id)&&Drive.state.receipts[tx.id]) receiptTxIds.push(tx.id); }
+    if (isSplit) { if(tx.subtransactions.some(s=>selectedSubIds.has(`${tx.id}::${s.id}`))&&Drive.state.receipts[tx.id]) entries.push({txId:tx.id,payee:tx.payee_name||'Unknown',date:tx.date||''}); }
+    else { if(selectedIds.has(tx.id)&&Drive.state.receipts[tx.id]) entries.push({txId:tx.id,payee:tx.payee_name||'Unknown',date:tx.date||''}); }
   });
-  cashTransactions.forEach(c=>{if(selectedIds.has(c.id)&&Drive.state.receipts[c.id]) receiptTxIds.push(c.id);});
-  if (!receiptTxIds.length) { msgEl.innerHTML='<div class="error-msg">No receipts attached to selected transactions.</div>'; return; }
-  showLoading('Loading receipts from Drive...');
-  const annexEntries=[]; let num=1;
-  for (const txId of receiptTxIds) {
-    const dataUrl=await Drive.getReceiptDataUrl(txId); if(!dataUrl) continue;
-    const tx=allTransactions.find(t=>t.id===txId)||cashTransactions.find(t=>t.id===txId);
-    annexEntries.push({num:num++,payee:tx?.payee_name||'Cash',date:tx?.date||'',dataUrl});
-  }
-  if (!annexEntries.length) { hideLoading(); msgEl.innerHTML='<div class="error-msg">Could not load receipt images.</div>'; return; }
-  showLoading('Creating Google Doc...');
-  const docHtml=buildAnnexHtml(period,annexEntries);
+  cashTransactions.forEach(c=>{if(selectedIds.has(c.id)&&Drive.state.receipts[c.id]) entries.push({txId:c.id,payee:c.payee_name||'Cash',date:c.date||''});});
+  if (!entries.length) { msgEl.innerHTML='<div class="error-msg">No receipts attached to selected transactions.</div>'; return; }
+  showLoading('Generating Receipt PDF…');
   try {
-    const result=await Drive.createGoogleDoc(`Izzy Receipts — ${period}`,docHtml);
+    const res=await fetch('/api/drive/receipt-pdf',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({period,entries})});
+    const data=await res.json();
     hideLoading();
-    msgEl.innerHTML=`<div class="success-msg">Done! <a href="${result.webViewLink}" target="_blank" style="color:var(--accent);font-weight:500;">Open in Drive →</a></div>`;
+    if (!res.ok) throw new Error(data.error||'PDF generation failed');
+    msgEl.innerHTML=`<div class="success-msg">Done! <a href="${data.webViewLink}" target="_blank" style="color:var(--accent);font-weight:500;">Open in Drive →</a></div>`;
   } catch(e) { hideLoading(); msgEl.innerHTML=`<div class="error-msg">Error: ${e.message}</div>`; }
 }
 
@@ -1047,15 +1040,6 @@ function buildRevolutRows(results, monthLabel) {
   return rows;
 }
 
-function buildAnnexHtml(period,entries) {
-  const pages=[]; for(let i=0;i<entries.length;i+=4) pages.push(entries.slice(i,i+4));
-  return `<!DOCTYPE html><html><head><meta charset="UTF-8"/>
-<style>body{font-family:sans-serif;font-size:11pt;color:#1a1916;}h1{font-size:16pt;font-weight:600;margin-bottom:4px;}.sub{font-size:10pt;color:#6b6860;margin-bottom:20px;}.page{page-break-before:always;padding:10mm;}.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;}.cell{border:1px solid #e2e0d8;border-radius:6px;padding:10px;}.label{font-size:9pt;font-weight:600;color:#6b6860;margin-bottom:6px;font-family:monospace;}img{width:100%;max-height:200px;object-fit:contain;}</style>
-</head><body>
-<div style="padding:10mm 10mm 0;"><h1>Receipt Annex — ${period}</h1><p class="sub">Generated ${new Date().toLocaleDateString('en-GB',{day:'numeric',month:'long',year:'numeric'})}</p></div>
-${pages.map((page,pi)=>`<div class="${pi>0?'page':''}"><div class="grid">${page.map(e=>`<div class="cell"><div class="label">#${e.num} — ${e.payee} — ${e.date}</div><img src="${e.dataUrl}"/></div>`).join('')}</div></div>`).join('')}
-</body></html>`;
-}
 </script>
 </body>
 </html>

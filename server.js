@@ -3,6 +3,8 @@ const express = require('express');
 const session = require('express-session');
 const { google } = require('googleapis');
 const path = require('path');
+const PDFDocument = require('pdfkit');
+const sharp = require('sharp');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -618,6 +620,167 @@ app.post('/api/sheets/revolut-summary', requireDrive, async (req, res) => {
     res.json({ ok: true, url });
   } catch (e) {
     console.error('Revolut summary error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── Receipt PDF ──────────────────────────────────────────────────────────────
+// Converts any image buffer to JPEG/PNG that pdfkit can embed.
+async function normImageForPDF(buf, mime) {
+  if (mime === 'image/jpeg' || mime === 'image/png') return { buf, mime };
+  try {
+    const out = await sharp(buf).jpeg({ quality: 88 }).toBuffer();
+    return { buf: out, mime: 'image/jpeg' };
+  } catch (e) {
+    console.warn(`Image normalisation failed (${mime}):`, e.message);
+    return null;
+  }
+}
+
+// Generates an A4 PDF with a 2×2 receipt grid, page numbers, and a title on
+// page 1.  Returns a Buffer.
+// images: [{buf, mime, payee, date}], already normalised to JPEG/PNG.
+function buildReceiptPDF(period, images) {
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ size: 'A4', margin: 0, autoFirstPage: true });
+    const chunks = [];
+    doc.on('data', c => chunks.push(c));
+    doc.on('end',  () => resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+
+    const W = 595.28, H = 841.89;
+    const ML = 30, MR = 30; // left/right margins
+    const MB = 36;           // bottom margin (page numbers live here)
+    const TITLE_H = 58;      // vertical space reserved for title on page 1
+    const MT_REST = 28;      // top margin on pages 2+
+    const GAP = 8;           // gap between cells
+    const LABEL_H = 26;      // height of label strip below image
+
+    const cellW = (W - ML - MR - GAP) / 2;
+
+    // First page: grid starts below the title block
+    const gridTop1    = 30 + TITLE_H + 6;
+    const cellH1      = (H - gridTop1 - MB - GAP) / 2;
+
+    // Other pages: grid starts at top margin
+    const gridTopRest = MT_REST;
+    const cellHRest   = (H - gridTopRest - MB - GAP) / 2;
+
+    const totalPages = Math.ceil(images.length / 4);
+    const genDate    = new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
+
+    function drawPageChrome(pageNum, isFirst) {
+      if (isFirst) {
+        doc.font('Helvetica-Bold').fontSize(16).fillColor('#1a1916')
+           .text(`Receipt Annex — ${period}`, ML, 30, { width: W - ML - MR });
+        doc.font('Helvetica').fontSize(10).fillColor('#6b6860')
+           .text(`Generated ${genDate}`, ML, 52, { width: W - ML - MR });
+      }
+      doc.font('Helvetica').fontSize(9).fillColor('#9c9a94')
+         .text(`Page ${pageNum} of ${totalPages}`, ML, H - MB + 8, { width: W - ML - MR, align: 'center' });
+    }
+
+    images.forEach((img, idx) => {
+      const pageIdx   = Math.floor(idx / 4);
+      const posInPage = idx % 4;
+      const isFirst   = pageIdx === 0;
+
+      if (posInPage === 0) {
+        if (pageIdx > 0) doc.addPage();
+        drawPageChrome(pageIdx + 1, isFirst);
+      }
+
+      const gridTop = isFirst ? gridTop1    : gridTopRest;
+      const cellH   = isFirst ? cellH1      : cellHRest;
+      const col     = posInPage % 2;
+      const row     = Math.floor(posInPage / 2);
+      const x       = ML + col * (cellW + GAP);
+      const y       = gridTop + row * (cellH + GAP);
+      const imgAreaH = cellH - LABEL_H - 6; // image sits above the label strip
+
+      // Cell border
+      doc.rect(x, y, cellW, cellH).strokeColor('#d1d0c8').lineWidth(0.5).stroke();
+
+      // Image, fitted within the image area with aspect-ratio preserved
+      try {
+        doc.image(img.buf, x + 4, y + 4, {
+          fit:    [cellW - 8, imgAreaH],
+          align:  'center',
+          valign: 'center',
+        });
+      } catch (e) {
+        console.warn(`Could not embed receipt image ${idx + 1}:`, e.message);
+        doc.font('Helvetica').fontSize(9).fillColor('#9c9a94')
+           .text('[Image unavailable]', x + 4, y + imgAreaH / 2, { width: cellW - 8, align: 'center' });
+      }
+
+      // Label: "#N — Payee — Date"
+      const label = `#${idx + 1} — ${img.payee} — ${img.date}`;
+      doc.font('Helvetica').fontSize(9).fillColor('#444444')
+         .text(label, x + 4, y + cellH - LABEL_H + 2, { width: cellW - 8, height: LABEL_H - 4, ellipsis: true });
+    });
+
+    doc.end();
+  });
+}
+
+// POST /api/drive/receipt-pdf
+// Body: { period: "June 2026", entries: [{txId, payee, date}, ...] }
+// Fetches each receipt from Drive, generates an A4 PDF, uploads it to the
+// monthly subfolder under Izzy Report Receipts, returns { webViewLink }.
+app.post('/api/drive/receipt-pdf', requireDrive, async (req, res) => {
+  try {
+    await ensureDriveReady();
+    const { period, entries } = req.body;
+    if (!period || !Array.isArray(entries) || !entries.length) {
+      return res.status(400).json({ error: 'period and entries are required' });
+    }
+
+    // Fetch and normalise each receipt image from Drive
+    const images = [];
+    for (let i = 0; i < entries.length; i++) {
+      const { txId, payee, date } = entries[i];
+      const receipt = driveAppState.receipts?.[txId];
+      if (!receipt?.fileId) { console.warn(`No receipt stored for txId ${txId}`); continue; }
+      try {
+        const fileRes = await driveFetch(
+          `https://www.googleapis.com/drive/v3/files/${receipt.fileId}?alt=media`
+        );
+        const rawBuf = Buffer.from(await fileRes.arrayBuffer());
+        const mime   = receipt.mime || 'image/jpeg';
+        const normed = await normImageForPDF(rawBuf, mime);
+        if (!normed) { console.warn(`Skipping unembeddable image for ${txId}`); continue; }
+        images.push({ buf: normed.buf, mime: normed.mime, payee: payee || 'Unknown', date: date || '' });
+      } catch (e) {
+        console.warn(`Could not load receipt ${txId}:`, e.message);
+      }
+    }
+
+    if (!images.length) return res.status(400).json({ error: 'No receipt images could be loaded from Drive' });
+
+    console.log(`Generating receipt PDF for "${period}" with ${images.length} image(s)…`);
+    const pdfBuf = await buildReceiptPDF(period, images);
+
+    // Save to Izzy Report Receipts / [period] /
+    const receiptsFolderId = await getOrCreateReceiptsFolder();
+    const monthFolderId    = await getOrCreateMonthFolder(receiptsFolderId, period);
+    const pdfName          = `Izzy Receipts — ${period}.pdf`;
+
+    const form = new FormData();
+    form.append('metadata', new Blob(
+      [JSON.stringify({ name: pdfName, parents: [monthFolderId] })],
+      { type: 'application/json' }
+    ));
+    form.append('file', new Blob([pdfBuf], { type: 'application/pdf' }));
+    const created = await driveFetchJson(
+      'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,webViewLink',
+      { method: 'POST', body: form }
+    );
+
+    console.log('Receipt PDF uploaded:', created.id);
+    res.json({ webViewLink: created.webViewLink });
+  } catch (e) {
+    console.error('Receipt PDF error:', e.message);
     res.status(500).json({ error: e.message });
   }
 });
