@@ -977,8 +977,8 @@ function buildRevolutRows(results, monthLabel) {
     rows.push({ values: [] });
 
     const flat = flattenTxs(gbpResult.txs);
-    const isStarling = tx => (tx.category_name || '').toLowerCase().includes('reimburse from starling');
-    const isNatwest  = tx => (tx.category_name || '').toLowerCase().includes('reimburse from natwest');
+    const isStarling = tx => (tx.category_name || '').toLowerCase().includes('starling');
+    const isNatwest  = tx => (tx.category_name || '').toLowerCase().includes('natwest');
 
     addSection('Transfer from First Direct',
       flat.filter(tx => !isStarling(tx) && !isNatwest(tx)),
