@@ -746,52 +746,6 @@ function buildReceiptPDF(period, images) {
   });
 }
 
-// Search Drive for a receipt file by payee+date when the state.json reference is missing.
-// Returns { fileId, filename, mime } or null. Saves to driveAppState.receipts if found.
-async function findReceiptInDriveByName(txId, payee, date) {
-  const cleanPayee = (payee || '').replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim();
-  let datePart = '';
-  if (date && /^\d{4}-\d{2}-\d{2}$/.test(date)) {
-    const [year, month, day] = date.split('-');
-    datePart = `${day}${month}${year}`;
-  }
-  if (!cleanPayee || !datePart) return null;
-
-  const namePrefix  = `${cleanPayee} ${datePart}`;
-  const monthLabel  = getMonthLabel(date);
-
-  try {
-    const receiptsFolderId = await getOrCreateReceiptsFolder();
-    const monthFolderId    = await getOrCreateMonthFolder(receiptsFolderId, monthLabel);
-
-    // Search for any file in this month folder whose name starts with payee+date
-    const q = encodeURIComponent(
-      `name contains '${namePrefix}' and '${monthFolderId}' in parents and mimeType != 'application/vnd.google-apps.folder' and trashed=false`
-    );
-    const data = await driveFetchJson(
-      `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)&orderBy=createdTime+asc`
-    );
-    if (!data.files?.length) {
-      console.warn(`Drive search for "${namePrefix}" in ${monthLabel} found nothing`);
-      return null;
-    }
-    const file = data.files[0];
-    const dot  = file.name.lastIndexOf('.');
-    const ext  = dot !== -1 ? file.name.slice(dot) : '';
-    const mime = Object.entries(MIME_EXT).find(([, e]) => e === ext)?.[0] || 'image/jpeg';
-    const found = { fileId: file.id, filename: file.name, mime };
-    console.log(`Recovered receipt for txId ${txId}: ${file.name} (${file.id})`);
-    // Persist the recovered reference so subsequent requests use the cache
-    if (!driveAppState.receipts) driveAppState.receipts = {};
-    driveAppState.receipts[txId] = found;
-    await saveState().catch(e => console.warn('Could not save recovered receipt state:', e.message));
-    return found;
-  } catch (e) {
-    console.warn(`Drive search failed for "${namePrefix}":`, e.message);
-    return null;
-  }
-}
-
 // POST /api/drive/receipt-pdf
 // Body: { period: "June 2026", entries: [{txId, payee, date}, ...] }
 // Fetches each receipt from Drive, generates an A4 PDF, uploads it to the
@@ -804,28 +758,68 @@ app.post('/api/drive/receipt-pdf', requireDrive, async (req, res) => {
       return res.status(400).json({ error: 'period and entries are required' });
     }
 
-    // Pre-warm the folder cache so parallel receipt lookups don't race each other
-    // into creating duplicate folders.
+    // Ensure the month folder exists (also warms the folder ID caches).
     const receiptsFolderId = await getOrCreateReceiptsFolder();
     const monthFolderId    = await getOrCreateMonthFolder(receiptsFolderId, period);
 
-    // Fetch and normalise all receipt images in parallel to avoid sequential
-    // Drive round-trips that would blow Render's 30-second request timeout.
-    const results = await Promise.all(entries.map(async ({ txId, payee, date }) => {
-      try {
-        let receipt = driveAppState.receipts?.[txId];
-        if (!receipt?.fileId) {
-          // State reference missing — search Drive by filename (PayeeName DDMMYYYY)
-          receipt = await findReceiptInDriveByName(txId, payee, date);
-        }
-        if (!receipt?.fileId) return { ok: false, payee };
+    // If any entries are missing from state, do ONE bulk Drive listing of the
+    // month folder and match locally — far cheaper than one search API call per
+    // receipt, which easily blows Render's 30-second request timeout.
+    const missingEntries = entries.filter(({ txId }) => !driveAppState.receipts?.[txId]?.fileId);
+    if (missingEntries.length > 0) {
+      console.log(`${missingEntries.length} receipt(s) missing from state — scanning Drive folder "${period}"…`);
+      const q = encodeURIComponent(
+        `'${monthFolderId}' in parents and mimeType != 'application/vnd.google-apps.folder' and trashed=false`
+      );
+      const listing = await driveFetchJson(
+        `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)&pageSize=200`
+      );
+      // Build a lookup map: "cleanPayee DDMMYYYY" (no ext, lowercase) → file info
+      const driveFileMap = new Map();
+      for (const f of listing.files || []) {
+        const dot = f.name.lastIndexOf('.');
+        const stem = (dot !== -1 ? f.name.slice(0, dot) : f.name).toLowerCase();
+        const ext  = dot !== -1 ? f.name.slice(dot) : '';
+        const mime = Object.entries(MIME_EXT).find(([, e]) => e === ext)?.[0] || 'image/jpeg';
+        driveFileMap.set(stem, { fileId: f.id, filename: f.name, mime });
+      }
+      console.log(`Found ${driveFileMap.size} file(s) in Drive folder`);
 
+      let stateUpdated = false;
+      for (const { txId, payee, date } of missingEntries) {
+        const clean = (payee || '').replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim();
+        let dp = '';
+        if (date && /^\d{4}-\d{2}-\d{2}$/.test(date)) {
+          const [yr, mo, dy] = date.split('-');
+          dp = `${dy}${mo}${yr}`;
+        }
+        if (!clean || !dp) continue;
+        const key = `${clean} ${dp}`.toLowerCase();
+        const found = driveFileMap.get(key);
+        if (found) {
+          console.log(`Recovered receipt for ${txId}: ${found.filename}`);
+          if (!driveAppState.receipts) driveAppState.receipts = {};
+          driveAppState.receipts[txId] = found;
+          stateUpdated = true;
+        } else {
+          console.warn(`No Drive file matched key "${key}"`);
+        }
+      }
+      if (stateUpdated) {
+        await saveState().catch(e => console.warn('Could not persist recovered receipt state:', e.message));
+      }
+    }
+
+    // Download and normalise all images in parallel.
+    const results = await Promise.all(entries.map(async ({ txId, payee, date }) => {
+      const receipt = driveAppState.receipts?.[txId];
+      if (!receipt?.fileId) return { ok: false, payee };
+      try {
         const fileRes = await driveFetch(
           `https://www.googleapis.com/drive/v3/files/${receipt.fileId}?alt=media`
         );
         const rawBuf = Buffer.from(await fileRes.arrayBuffer());
-        const mime   = receipt.mime || 'image/jpeg';
-        const normed = await normImageForPDF(rawBuf, mime);
+        const normed = await normImageForPDF(rawBuf, receipt.mime || 'image/jpeg');
         if (!normed) return { ok: false, payee };
         return { ok: true, buf: normed.buf, mime: normed.mime, payee: payee || 'Unknown', date: date || '' };
       } catch (e) {
@@ -838,13 +832,13 @@ app.post('/api/drive/receipt-pdf', requireDrive, async (req, res) => {
     const missing = results.filter(r => !r.ok).map(r => r.payee).filter(Boolean);
 
     if (!images.length) {
-      const detail = missing.length ? ` Searched Drive for: ${missing.join(', ')}.` : '';
-      return res.status(400).json({ error: `No receipt images could be loaded from Drive.${detail} Check that receipt files exist in the "Izzy Report Receipts / ${period}" folder.` });
+      const detail = missing.length ? ` Could not load: ${missing.join(', ')}.` : '';
+      return res.status(400).json({ error: `No receipt images could be loaded from Drive.${detail} Check that files exist in "Izzy Report Receipts / ${period}".` });
     }
 
     console.log(`Generating receipt PDF for "${period}" with ${images.length} image(s)…`);
-    const pdfBuf = await buildReceiptPDF(period, images);
-    const pdfName          = `Izzy Receipts — ${period}.pdf`;
+    const pdfBuf  = await buildReceiptPDF(period, images);
+    const pdfName = `Izzy Receipts — ${period}.pdf`;
 
     const form = new FormData();
     form.append('metadata', new Blob(
