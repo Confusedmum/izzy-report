@@ -288,7 +288,7 @@ td { padding: 8px; vertical-align: top; }
       <button class="primary" onclick="exportCSV()">⬇ Download CSV</button>
       <button class="primary" onclick="generateReceiptPDF()">📄 Generate Receipt PDF</button>
     </div>
-    <p class="note">CSV = transaction table · Google Doc = receipt annex saved to your Drive</p>
+    <p class="note">CSV = transaction table · PDF = receipt annex saved to your Drive</p>
     <div id="generateMsg"></div>
   </div>
 
@@ -836,7 +836,9 @@ async function generateReceiptPDF() {
   showLoading('Generating Receipt PDF…');
   try {
     const res=await fetch('/api/drive/receipt-pdf',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({period,entries})});
-    const data=await res.json();
+    const text=await res.text();
+    let data;
+    try { data=JSON.parse(text); } catch { throw new Error(`Server returned non-JSON response (status ${res.status}): ${text.slice(0,200)||'empty'}`); }
     hideLoading();
     if (!res.ok) throw new Error(data.error||'PDF generation failed');
     msgEl.innerHTML=`<div class="success-msg">Done! <a href="${data.webViewLink}" target="_blank" style="color:var(--accent);font-weight:500;">Open in Drive →</a></div>`;
