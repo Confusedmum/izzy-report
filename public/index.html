@@ -611,14 +611,17 @@ async function loadTransactions() {
   if (isFullAccess) {
     // Build per-budget category sets, preserving CONFIG.YNAB_BUDGETS order
     const byBudgetSets = {};
+    // Pre-init all active budgets so their headers always appear even with 0 categorised transactions
+    budgets.filter(b => activeBudgets.has(b.id)).forEach(b => { byBudgetSets[b.name] = new Set(); });
     allTransactions.forEach(tx => {
       if (!byBudgetSets[tx.budgetName]) byBudgetSets[tx.budgetName] = new Set();
       if (tx.category_name) byBudgetSets[tx.budgetName].add(tx.category_name);
       if (tx.subtransactions) tx.subtransactions.forEach(s => { if (s.category_name) byBudgetSets[tx.budgetName].add(s.category_name); });
     });
+    console.log('[catFilter] per-budget categories:', Object.fromEntries(Object.entries(byBudgetSets).map(([k,v])=>[k,[...v]])));
     catsByBudget = {};
     CONFIG.YNAB_BUDGETS.forEach(b => {
-      if (byBudgetSets[b.name]) catsByBudget[b.name] = [...byBudgetSets[b.name]].sort();
+      if (byBudgetSets[b.name] !== undefined) catsByBudget[b.name] = [...byBudgetSets[b.name]].sort();
     });
     renderCategoryFilter();
     document.getElementById('stepCategories').classList.remove('section-hidden');
@@ -633,10 +636,12 @@ function renderCategoryFilter() {
   document.getElementById('catFilterGrid').innerHTML = Object.entries(catsByBudget).map(([budgetName, cats]) => `
     <div class="cat-group">
       <div class="cat-group-header">${budgetName}</div>
-      <div class="cat-group-items">${cats.map(cat => {
-        const checked = savedPrefs ? savedPrefs.includes(cat) : true;
-        return `<label class="cat-check"><input type="checkbox" value="${cat}" ${checked?'checked':''} onchange="updateActiveCategories()"/> ${cat}</label>`;
-      }).join('')}</div>
+      <div class="cat-group-items">${cats.length === 0
+        ? `<span style="font-size:12px;color:#888;font-style:italic">No categorised transactions in this period</span>`
+        : cats.map(cat => {
+          const checked = savedPrefs ? savedPrefs.includes(cat) : true;
+          return `<label class="cat-check"><input type="checkbox" value="${cat}" ${checked?'checked':''} onchange="updateActiveCategories()"/> ${cat}</label>`;
+        }).join('')}</div>
     </div>`).join('');
   updateActiveCategories();
 }
