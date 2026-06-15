@@ -84,8 +84,11 @@ td { padding: 8px; vertical-align: top; }
 .success-msg { color: #065f46; background: #d1fae5; border-radius: var(--radius); padding: 8px 12px; font-size: 13px; margin-top: 8px; }
 .note { font-size: 12px; color: var(--text-3); margin-top: 6px; }
 .section-hidden { display: none !important; }
-.cat-filter-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 6px; max-height: 200px; overflow-y: auto; }
-.cat-check { display: flex; align-items: center; gap: 6px; font-size: 13px; padding: 4px 0; }
+.cat-filter-grid { max-height: 280px; overflow-y: auto; }
+.cat-group { margin-bottom: 10px; }
+.cat-group-header { font-weight: 600; font-size: 12px; color: var(--text-2); text-transform: uppercase; letter-spacing: 0.04em; padding: 4px 0 4px; border-bottom: 1px solid var(--border); margin-bottom: 6px; }
+.cat-group-items { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 2px 6px; }
+.cat-check { display: flex; align-items: center; gap: 6px; font-size: 13px; padding: 3px 0; }
 .cat-check input { margin: 0; }
 .rates-row { display: flex; gap: 12px; flex-wrap: wrap; }
 .rate-field { display: flex; flex-direction: column; gap: 4px; }
@@ -422,7 +425,7 @@ let selectedSubIds = new Set();
 let cashTransactions = [];
 let activeBudgets = new Set();
 let activeCategories = null;
-let allCategories = [];
+let catsByBudget = {}; // { budgetName: [sorted category strings] }
 let cashIdCounter = 0;
 let modalTxId = null;
 let modalPayee = null;
@@ -606,12 +609,17 @@ async function loadTransactions() {
   allTransactions = orderedBudgets.flatMap(b=>byBudget[b.name]||[]);
   if (errors.length) errEl.innerHTML = `<div class="error-msg">${errors.join(', ')}</div>`;
   if (isFullAccess) {
-    const cats = new Set();
+    // Build per-budget category sets, preserving CONFIG.YNAB_BUDGETS order
+    const byBudgetSets = {};
     allTransactions.forEach(tx => {
-      if (tx.category_name) cats.add(tx.category_name);
-      if (tx.subtransactions) tx.subtransactions.forEach(s=>{if(s.category_name) cats.add(s.category_name);});
+      if (!byBudgetSets[tx.budgetName]) byBudgetSets[tx.budgetName] = new Set();
+      if (tx.category_name) byBudgetSets[tx.budgetName].add(tx.category_name);
+      if (tx.subtransactions) tx.subtransactions.forEach(s => { if (s.category_name) byBudgetSets[tx.budgetName].add(s.category_name); });
     });
-    allCategories = [...cats].sort();
+    catsByBudget = {};
+    CONFIG.YNAB_BUDGETS.forEach(b => {
+      if (byBudgetSets[b.name]) catsByBudget[b.name] = [...byBudgetSets[b.name]].sort();
+    });
     renderCategoryFilter();
     document.getElementById('stepCategories').classList.remove('section-hidden');
   }
@@ -622,10 +630,14 @@ async function loadTransactions() {
 // ─── Category filter ──────────────────────────────────────────────────────────
 function renderCategoryFilter() {
   const savedPrefs = Drive.getCategoryPrefs();
-  document.getElementById('catFilterGrid').innerHTML = allCategories.map(cat => {
-    const checked = savedPrefs ? savedPrefs.includes(cat) : true;
-    return `<label class="cat-check"><input type="checkbox" value="${cat}" ${checked?'checked':''} onchange="updateActiveCategories()"/> ${cat}</label>`;
-  }).join('');
+  document.getElementById('catFilterGrid').innerHTML = Object.entries(catsByBudget).map(([budgetName, cats]) => `
+    <div class="cat-group">
+      <div class="cat-group-header">${budgetName}</div>
+      <div class="cat-group-items">${cats.map(cat => {
+        const checked = savedPrefs ? savedPrefs.includes(cat) : true;
+        return `<label class="cat-check"><input type="checkbox" value="${cat}" ${checked?'checked':''} onchange="updateActiveCategories()"/> ${cat}</label>`;
+      }).join('')}</div>
+    </div>`).join('');
   updateActiveCategories();
 }
 function updateActiveCategories() {
