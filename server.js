@@ -822,11 +822,24 @@ app.post('/api/drive/receipt-pdf', requireDrive, async (req, res) => {
     }
 
     // Build the entry list — only entries where we have a fileId can be embedded.
+    // Sort by date extracted from filename ("Payee DDMMYYYY.ext" → YYYYMMDD), then payee.
     const pdfEntries = entries.map(({ txId, payee, date }) => ({
       payee: payee || 'Unknown',
       date:  date  || '',
       receipt: driveAppState.receipts?.[txId] || null,
-    })).filter(e => e.receipt?.fileId);
+    })).filter(e => e.receipt?.fileId).sort((a, b) => {
+      const dateSortKey = entry => {
+        const name = entry.receipt.filename || '';
+        const stem = name.includes('.') ? name.slice(0, name.lastIndexOf('.')) : name;
+        const ddmmyyyy = stem.slice(-8); // last 8 chars of stem
+        // Convert DDMMYYYY → YYYYMMDD for lexicographic sort
+        if (/^\d{8}$/.test(ddmmyyyy)) return ddmmyyyy.slice(4) + ddmmyyyy.slice(2, 4) + ddmmyyyy.slice(0, 2);
+        return '';
+      };
+      const da = dateSortKey(a), db = dateSortKey(b);
+      if (da !== db) return da.localeCompare(db);
+      return a.payee.localeCompare(b.payee);
+    });
 
     const missing = entries
       .filter(({ txId }) => !driveAppState.receipts?.[txId]?.fileId)
