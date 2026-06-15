@@ -310,23 +310,35 @@ td { padding: 8px; vertical-align: top; }
 <script>
 console.log('[Izzy] Drive script block loading');
 // ─── Drive — all operations go through server API endpoints ───────────────────
+
+// Safe fetch wrapper: reads body as text then parses JSON so an empty or HTML
+// response (e.g. Render cold-start 502) produces a readable error instead of
+// the browser's opaque "Failed to execute 'json' on 'Response'" message.
+async function apiFetch(url, opts = {}) {
+  const res = await fetch(url, opts);
+  const text = await res.text();
+  let data;
+  try { data = JSON.parse(text); } catch {
+    const preview = text.slice(0, 120) || '(empty body)';
+    const hint = !text ? ' The server may be cold-starting — wait 30 seconds and try again.' : '';
+    throw new Error(`Server returned non-JSON (HTTP ${res.status}): ${preview}${hint}`);
+  }
+  return { res, data };
+}
+
 const Drive = {
   state: { reportedTxIds: {}, categoryPrefs: null, receipts: {} },
 
   async init() {
     const controller = new AbortController();
     const tid = setTimeout(() => controller.abort(), 30000);
-    let res;
+    let res, data;
     try {
-      res = await fetch('/api/drive/init', { signal: controller.signal });
+      ({ res, data } = await apiFetch('/api/drive/init', { signal: controller.signal }));
     } finally {
       clearTimeout(tid);
     }
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || `Drive init failed (${res.status})`);
-    }
-    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `Drive init failed (${res.status})`);
     this.state = { reportedTxIds: {}, categoryPrefs: null, receipts: {}, ...data.state };
   },
 
@@ -335,7 +347,7 @@ const Drive = {
   getCategoryPrefs()    { return this.state.categoryPrefs; },
 
   async _saveState() {
-    const res = await fetch('/api/drive/state', {
+    const { res } = await apiFetch('/api/drive/state', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(this.state),
@@ -355,12 +367,11 @@ const Drive = {
   },
 
   async uploadReceipt(txId, dataUrl, filename, payee, txDate) {
-    const res = await fetch('/api/drive/receipt/' + txId, {
+    const { res, data } = await apiFetch('/api/drive/receipt/' + txId, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ dataUrl, filename, payee, txDate }),
     });
-    const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Upload failed');
     if (!this.state.receipts) this.state.receipts = {};
     this.state.receipts[txId] = { fileId: data.fileId, filename: data.filename || filename };
@@ -375,20 +386,18 @@ const Drive = {
   async getReceiptDataUrl(txId) {
     if (!this.state.receipts?.[txId]) return null;
     try {
-      const res = await fetch('/api/drive/receipt/' + txId);
+      const { res, data } = await apiFetch('/api/drive/receipt/' + txId);
       if (!res.ok) return null;
-      const data = await res.json();
       return data.dataUrl;
     } catch (e) { return null; }
   },
 
   async createGoogleDoc(title, htmlContent) {
-    const res = await fetch('/api/drive/doc', {
+    const { res, data } = await apiFetch('/api/drive/doc', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ title, htmlContent }),
     });
-    const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Doc creation failed');
     return data;
   },
@@ -906,12 +915,11 @@ async function generateRevolutSummary() {
     showLoading('Writing to Google Sheets...');
     const rows = buildRevolutRows(results, monthLabel);
 
-    const res  = await fetch('/api/sheets/revolut-summary', {
+    const { res, data } = await apiFetch('/api/sheets/revolut-summary', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ month: monthLabel, rows }),
     });
-    const data = await res.json();
     hideLoading();
     if (!res.ok) throw new Error(data.error || 'Sheet write failed');
     msgEl.innerHTML = `<div class="success-msg">Done! <a href="${data.url}" target="_blank" style="color:var(--accent);font-weight:500;">Open in Sheets →</a></div>`;
