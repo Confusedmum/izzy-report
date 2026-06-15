@@ -804,31 +804,38 @@ app.post('/api/drive/receipt-pdf', requireDrive, async (req, res) => {
       return res.status(400).json({ error: 'period and entries are required' });
     }
 
-    // Fetch and normalise each receipt image from Drive
-    const images = [];
-    const missing = [];
-    for (let i = 0; i < entries.length; i++) {
-      const { txId, payee, date } = entries[i];
-      let receipt = driveAppState.receipts?.[txId];
-      if (!receipt?.fileId) {
-        // State reference missing — try to find the file in Drive by filename
-        receipt = await findReceiptInDriveByName(txId, payee, date);
-      }
-      if (!receipt?.fileId) { missing.push(payee || txId); continue; }
+    // Pre-warm the folder cache so parallel receipt lookups don't race each other
+    // into creating duplicate folders.
+    const receiptsFolderId = await getOrCreateReceiptsFolder();
+    const monthFolderId    = await getOrCreateMonthFolder(receiptsFolderId, period);
+
+    // Fetch and normalise all receipt images in parallel to avoid sequential
+    // Drive round-trips that would blow Render's 30-second request timeout.
+    const results = await Promise.all(entries.map(async ({ txId, payee, date }) => {
       try {
+        let receipt = driveAppState.receipts?.[txId];
+        if (!receipt?.fileId) {
+          // State reference missing — search Drive by filename (PayeeName DDMMYYYY)
+          receipt = await findReceiptInDriveByName(txId, payee, date);
+        }
+        if (!receipt?.fileId) return { ok: false, payee };
+
         const fileRes = await driveFetch(
           `https://www.googleapis.com/drive/v3/files/${receipt.fileId}?alt=media`
         );
         const rawBuf = Buffer.from(await fileRes.arrayBuffer());
         const mime   = receipt.mime || 'image/jpeg';
         const normed = await normImageForPDF(rawBuf, mime);
-        if (!normed) { console.warn(`Skipping unembeddable image for ${txId}`); missing.push(payee || txId); continue; }
-        images.push({ buf: normed.buf, mime: normed.mime, payee: payee || 'Unknown', date: date || '' });
+        if (!normed) return { ok: false, payee };
+        return { ok: true, buf: normed.buf, mime: normed.mime, payee: payee || 'Unknown', date: date || '' };
       } catch (e) {
-        console.warn(`Could not load receipt ${txId}:`, e.message);
-        missing.push(payee || txId);
+        console.warn(`Could not load receipt for ${payee}:`, e.message);
+        return { ok: false, payee };
       }
-    }
+    }));
+
+    const images  = results.filter(r => r.ok);
+    const missing = results.filter(r => !r.ok).map(r => r.payee).filter(Boolean);
 
     if (!images.length) {
       const detail = missing.length ? ` Searched Drive for: ${missing.join(', ')}.` : '';
@@ -837,10 +844,6 @@ app.post('/api/drive/receipt-pdf', requireDrive, async (req, res) => {
 
     console.log(`Generating receipt PDF for "${period}" with ${images.length} image(s)…`);
     const pdfBuf = await buildReceiptPDF(period, images);
-
-    // Save to Izzy Report Receipts / [period] /
-    const receiptsFolderId = await getOrCreateReceiptsFolder();
-    const monthFolderId    = await getOrCreateMonthFolder(receiptsFolderId, period);
     const pdfName          = `Izzy Receipts — ${period}.pdf`;
 
     const form = new FormData();
