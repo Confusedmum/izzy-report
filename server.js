@@ -1,4 +1,5 @@
 require('dotenv').config();
+const https   = require('https');
 const express = require('express');
 const session = require('express-session');
 const { google } = require('googleapis');
@@ -28,17 +29,66 @@ if (process.env.GOOGLE_REFRESH_TOKEN) {
   googleReady = true;
 }
 
-// Get a fresh access token — oauthClient handles refresh automatically.
-// If the refresh token itself is invalid (invalid_grant), mark Drive as
-// unconfigured so the admin is prompted to re-auth rather than retrying forever.
+// Token cache — we manage this ourselves using Node's built-in https module
+// rather than oauthClient.getAccessToken() because gaxios v6 uses native fetch
+// (Undici) which produces "Premature close" errors against Google's token
+// endpoint on some cloud hosts (including Render).
+let _cachedToken = null;
+let _tokenExpiry = 0;
+
+function _refreshTokenHttps() {
+  return new Promise((resolve, reject) => {
+    if (!process.env.GOOGLE_REFRESH_TOKEN) {
+      return reject(new Error('GOOGLE_REFRESH_TOKEN env var not set'));
+    }
+    const body = new URLSearchParams({
+      client_id:     process.env.GOOGLE_CLIENT_ID,
+      client_secret: process.env.GOOGLE_CLIENT_SECRET,
+      refresh_token: process.env.GOOGLE_REFRESH_TOKEN,
+      grant_type:    'refresh_token',
+    }).toString();
+
+    const req = https.request({
+      hostname: 'oauth2.googleapis.com',
+      path:     '/token',
+      method:   'POST',
+      headers:  {
+        'Content-Type':   'application/x-www-form-urlencoded',
+        'Content-Length': Buffer.byteLength(body),
+      },
+    }, (res) => {
+      let raw = '';
+      res.on('data', c => raw += c);
+      res.on('end', () => {
+        let parsed;
+        try { parsed = JSON.parse(raw); }
+        catch { return reject(new Error(`Token endpoint returned non-JSON: ${raw.slice(0, 120)}`)); }
+        if (parsed.error) {
+          const err = new Error(parsed.error_description || parsed.error);
+          err._oauthError = parsed.error;
+          return reject(err);
+        }
+        resolve(parsed);
+      });
+    });
+    req.setTimeout(30_000, () => req.destroy(new Error('Token request timed out after 30s')));
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
+
 async function getToken() {
+  // Return cached token if it has more than 60 s of life left
+  if (_cachedToken && Date.now() < _tokenExpiry - 60_000) return _cachedToken;
   try {
-    const { token } = await oauthClient.getAccessToken();
-    if (!token) throw new Error('Could not get access token. Check GOOGLE_REFRESH_TOKEN env var.');
-    return token;
+    const data = await _refreshTokenHttps();
+    _cachedToken = data.access_token;
+    _tokenExpiry = Date.now() + (data.expires_in * 1000);
+    console.log('Access token refreshed via https (expires in', data.expires_in, 's)');
+    return _cachedToken;
   } catch (e) {
-    const msg = (e.message || '') + JSON.stringify(e.response?.data || {});
-    if (msg.includes('invalid_grant') || msg.includes('Token has been expired or revoked')) {
+    if (e._oauthError === 'invalid_grant' || (e.message || '').includes('Token has been expired or revoked')) {
       googleReady = false;
       driveInitPromise = null;
       console.error('Refresh token is invalid — admin must reconnect at /auth/login');
@@ -62,19 +112,9 @@ async function driveFetch(url, opts = {}, _retried = false) {
   });
 
   if (res.status === 401 && !_retried) {
-    console.log('Drive API returned 401 — forcing token refresh and retrying...');
-    try {
-      await oauthClient.refreshAccessToken();
-    } catch (e) {
-      const msg = (e.message || '') + JSON.stringify(e.response?.data || {});
-      if (msg.includes('invalid_grant') || msg.includes('Token has been expired or revoked')) {
-        googleReady = false;
-        driveInitPromise = null;
-        console.error('Refresh token rejected during 401 retry — admin must reconnect at /auth/login');
-        throw new Error('Google Drive authorization has expired. An admin must visit /auth/login to reconnect.');
-      }
-      throw e;
-    }
+    console.log('Drive API returned 401 — clearing token cache and retrying...');
+    _cachedToken = null;
+    _tokenExpiry = 0;
     return driveFetch(url, opts, true);
   }
 
