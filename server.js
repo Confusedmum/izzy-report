@@ -13,12 +13,71 @@ const FOLDER_NAME = 'Izzy Report Tool';
 const TIMEOUT_MS = 30_000;
 
 // ─── OAuth client ──────────────────────────────────────────────────────────────
+// Custom transporter for google-auth-library that uses Node's built-in
+// https.request() instead of gaxios/fetch.  gaxios v6 defaults to Node 18's
+// native fetch (Undici) which has HTTP/2 negotiation issues with Google's token
+// endpoint on some cloud hosts (including Render), causing "Premature close".
+// By setting oauthClient.transporter = httpsTransporter every call through
+// google-auth-library — getAccessToken, refreshAccessToken, getToken — uses
+// plain HTTP/1.1 via the Node https module instead.
+const httpsTransporter = {
+  async request(opts) {
+    const url    = opts.url || opts.uri || '';
+    const method = (opts.method || 'POST').toUpperCase();
+
+    // google-auth-library passes body params as a plain object; encode them.
+    let body = '';
+    if (opts.data) {
+      body = typeof opts.data === 'string'
+        ? opts.data
+        : new URLSearchParams(opts.data).toString();
+    }
+
+    const headers = {
+      'Content-Type':   'application/x-www-form-urlencoded',
+      'Content-Length': Buffer.byteLength(body),
+      ...(opts.headers || {}),
+    };
+
+    const u = new URL(url);
+
+    return new Promise((resolve, reject) => {
+      const req = https.request(
+        { hostname: u.hostname, port: 443, path: u.pathname + u.search, method, headers },
+        (res) => {
+          let raw = '';
+          res.on('data', c => raw += c);
+          res.on('end', () => {
+            let data;
+            try { data = JSON.parse(raw); } catch { data = raw; }
+            if (res.statusCode >= 400) {
+              const err = new Error(
+                (data && (data.error_description || data.error)) || `HTTP ${res.statusCode}`
+              );
+              err.response = { data, status: res.statusCode, headers: res.headers, config: opts };
+              return reject(err);
+            }
+            resolve({ data, status: res.statusCode, statusText: res.statusMessage || '', headers: res.headers, config: opts });
+          });
+          res.on('error', reject);
+        }
+      );
+      req.setTimeout(30_000, () => req.destroy(new Error('Token request timed out after 30s')));
+      req.on('error', reject);
+      if (body) req.write(body);
+      req.end();
+    });
+  },
+};
+
 function makeOAuthClient() {
-  return new google.auth.OAuth2(
+  const client = new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
     process.env.GOOGLE_CLIENT_SECRET,
     process.env.GOOGLE_REDIRECT_URI
   );
+  client.transporter = httpsTransporter;
+  return client;
 }
 
 const oauthClient = makeOAuthClient();
@@ -29,66 +88,17 @@ if (process.env.GOOGLE_REFRESH_TOKEN) {
   googleReady = true;
 }
 
-// Token cache — we manage this ourselves using Node's built-in https module
-// rather than oauthClient.getAccessToken() because gaxios v6 uses native fetch
-// (Undici) which produces "Premature close" errors against Google's token
-// endpoint on some cloud hosts (including Render).
-let _cachedToken = null;
-let _tokenExpiry = 0;
-
-function _refreshTokenHttps() {
-  return new Promise((resolve, reject) => {
-    if (!process.env.GOOGLE_REFRESH_TOKEN) {
-      return reject(new Error('GOOGLE_REFRESH_TOKEN env var not set'));
-    }
-    const body = new URLSearchParams({
-      client_id:     process.env.GOOGLE_CLIENT_ID,
-      client_secret: process.env.GOOGLE_CLIENT_SECRET,
-      refresh_token: process.env.GOOGLE_REFRESH_TOKEN,
-      grant_type:    'refresh_token',
-    }).toString();
-
-    const req = https.request({
-      hostname: 'oauth2.googleapis.com',
-      path:     '/token',
-      method:   'POST',
-      headers:  {
-        'Content-Type':   'application/x-www-form-urlencoded',
-        'Content-Length': Buffer.byteLength(body),
-      },
-    }, (res) => {
-      let raw = '';
-      res.on('data', c => raw += c);
-      res.on('end', () => {
-        let parsed;
-        try { parsed = JSON.parse(raw); }
-        catch { return reject(new Error(`Token endpoint returned non-JSON: ${raw.slice(0, 120)}`)); }
-        if (parsed.error) {
-          const err = new Error(parsed.error_description || parsed.error);
-          err._oauthError = parsed.error;
-          return reject(err);
-        }
-        resolve(parsed);
-      });
-    });
-    req.setTimeout(30_000, () => req.destroy(new Error('Token request timed out after 30s')));
-    req.on('error', reject);
-    req.write(body);
-    req.end();
-  });
-}
-
+// Get a fresh access token via google-auth-library (token caching and expiry
+// are handled internally by oauthClient; httpsTransporter ensures the refresh
+// call uses Node https rather than Undici).
 async function getToken() {
-  // Return cached token if it has more than 60 s of life left
-  if (_cachedToken && Date.now() < _tokenExpiry - 60_000) return _cachedToken;
   try {
-    const data = await _refreshTokenHttps();
-    _cachedToken = data.access_token;
-    _tokenExpiry = Date.now() + (data.expires_in * 1000);
-    console.log('Access token refreshed via https (expires in', data.expires_in, 's)');
-    return _cachedToken;
+    const { token } = await oauthClient.getAccessToken();
+    if (!token) throw new Error('Could not get access token. Check GOOGLE_REFRESH_TOKEN env var.');
+    return token;
   } catch (e) {
-    if (e._oauthError === 'invalid_grant' || (e.message || '').includes('Token has been expired or revoked')) {
+    const msg = (e.message || '') + JSON.stringify(e.response?.data || {});
+    if (msg.includes('invalid_grant') || msg.includes('Token has been expired or revoked')) {
       googleReady = false;
       driveInitPromise = null;
       console.error('Refresh token is invalid — admin must reconnect at /auth/login');
@@ -112,9 +122,19 @@ async function driveFetch(url, opts = {}, _retried = false) {
   });
 
   if (res.status === 401 && !_retried) {
-    console.log('Drive API returned 401 — clearing token cache and retrying...');
-    _cachedToken = null;
-    _tokenExpiry = 0;
+    console.log('Drive API returned 401 — forcing token refresh and retrying...');
+    try {
+      await oauthClient.refreshAccessToken();
+    } catch (e) {
+      const msg = (e.message || '') + JSON.stringify(e.response?.data || {});
+      if (msg.includes('invalid_grant') || msg.includes('Token has been expired or revoked')) {
+        googleReady = false;
+        driveInitPromise = null;
+        console.error('Refresh token rejected during 401 retry — admin must reconnect at /auth/login');
+        throw new Error('Google Drive authorization has expired. An admin must visit /auth/login to reconnect.');
+      }
+      throw e;
+    }
     return driveFetch(url, opts, true);
   }
 
