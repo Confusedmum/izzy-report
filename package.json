@@ -5,7 +5,9 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "deploy": "wrangler deploy",
+    "preview": "wrangler dev"
   },
   "engines": {
     "node": ">=18"
@@ -18,5 +20,8 @@
     "http-proxy-middleware": "^3.0.3",
     "pdfkit": "^0.19.1",
     "sharp": "^0.32.6"
+  },
+  "devDependencies": {
+    "wrangler": "^4.101.0"
   }
 }
