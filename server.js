@@ -379,6 +379,13 @@ app.get('/auth/callback', async (req, res) => {
     const client = makeOAuthClient();
     const { tokens } = await client.getToken(code);
     oauthClient.setCredentials(tokens);
+    // Update the in-memory env var immediately so _refreshTokenHttps() uses the
+    // new token right away, without waiting for a Render redeploy.
+    if (tokens.refresh_token) {
+      process.env.GOOGLE_REFRESH_TOKEN = tokens.refresh_token;
+      _cachedToken = null;
+      _tokenExpiry = 0;
+    }
     googleReady = true;
     driveInitPromise = null;
     console.log('OAuth success. refresh_token present:', !!tokens.refresh_token);
