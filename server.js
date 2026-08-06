@@ -29,7 +29,13 @@ const oauthClient = makeOAuthClient();
 let googleReady = false;
 
 if (process.env.GOOGLE_REFRESH_TOKEN) {
-  oauthClient.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
+  const rt = process.env.GOOGLE_REFRESH_TOKEN.trim();
+  // Warn if the env var has surrounding whitespace (common copy-paste issue)
+  if (rt !== process.env.GOOGLE_REFRESH_TOKEN) {
+    console.warn('⚠ GOOGLE_REFRESH_TOKEN has leading/trailing whitespace — trimming automatically');
+    process.env.GOOGLE_REFRESH_TOKEN = rt;
+  }
+  oauthClient.setCredentials({ refresh_token: rt });
   googleReady = true;
 }
 
@@ -428,6 +434,18 @@ ${noToken ? `<div class="warn-box"><strong>No refresh token returned.</strong> G
 }
 
 app.get('/auth/logout', (req, res) => res.redirect('/'));
+
+// Quick token health-check — visit /auth/token-check to verify the token works
+app.get('/auth/token-check', async (req, res) => {
+  const rt = process.env.GOOGLE_REFRESH_TOKEN;
+  if (!rt) return res.json({ ok: false, error: 'GOOGLE_REFRESH_TOKEN not set', action: 'Visit /auth/login' });
+  try {
+    const token = await getToken();
+    res.json({ ok: true, tokenLength: rt.length, tokenStart: rt.slice(0, 6), accessTokenPresent: !!token });
+  } catch (e) {
+    res.json({ ok: false, error: e.message, oauthError: e._oauthError, tokenLength: rt.length, tokenStart: rt.slice(0, 6), action: 'Visit /auth/login to reconnect' });
+  }
+});
 
 // ─── Status + debug ────────────────────────────────────────────────────────────
 app.get('/api/auth/status', (req, res) => {
@@ -938,5 +956,10 @@ app.listen(PORT, () => {
   console.log(`  CLIENT_ID:     ${cid ? cid.slice(0, 24) + '…' : 'NOT SET ⚠'}`);
   console.log(`  CLIENT_SECRET: ${cs  ? `SET (length ${cs.length})` : 'NOT SET ⚠'}`);
   console.log(`  REDIRECT_URI:  ${ru  || 'NOT SET ⚠'}`);
-  if (!googleReady) console.log('  Google Drive not configured — visit /auth/login to connect.');
+  const rt = process.env.GOOGLE_REFRESH_TOKEN;
+  if (rt) {
+    console.log(`  REFRESH_TOKEN: SET (length ${rt.length}, starts "${rt.slice(0,6)}…", ends "…${rt.slice(-4)}")`);
+  } else {
+    console.log('  REFRESH_TOKEN: NOT SET ⚠ — visit /auth/login to connect.');
+  }
 });
