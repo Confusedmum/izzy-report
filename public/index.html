@@ -46,6 +46,7 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 .pill-group { display: flex; gap: 6px; flex-wrap: wrap; }
 .pill { font-size: 12px; padding: 4px 10px; border-radius: 20px; border: 1px solid var(--border-strong); background: var(--surface); cursor: pointer; user-select: none; transition: all 0.15s; }
 .pill.active { background: var(--accent); color: white; border-color: var(--accent); }
+#hideReceiptBtn.active-filter { background: var(--accent); color: white; border-color: var(--accent); }
 .pill .tag { font-size: 10px; opacity: 0.75; font-family: var(--mono); margin-left: 3px; }
 .summary-bar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-bottom: 1rem; }
 .stats { display: flex; gap: 16px; flex-wrap: wrap; }
@@ -243,9 +244,10 @@ td { padding: 8px; vertical-align: top; }
         <div class="stat">Showing <strong id="txCount">0</strong> transactions</div>
         <div class="stat" id="selectedStat"><strong id="selectedCount">0</strong> selected · <strong id="selectedTotal">£0.00</strong></div>
       </div>
-      <div style="display:flex;gap:8px;" id="selectionActions">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;" id="selectionActions">
         <button onclick="selectAll()">Select all</button>
         <button id="clearAllBtn" onclick="clearAll()">Clear all</button>
+        <button id="hideReceiptBtn" onclick="toggleHideWithReceipt()" title="Hide transactions that already have a receipt">🧾 Hide with receipt</button>
       </div>
     </div>
     <div class="table-wrap">
@@ -661,9 +663,20 @@ function toGBP(amount, currency) {
   return amount;
 }
 function sym(c) { return c==='EUR'?'€':c==='USD'?'$':'£'; }
+let hideWithReceipt = false;
+
+function toggleHideWithReceipt() {
+  hideWithReceipt = !hideWithReceipt;
+  const btn = document.getElementById('hideReceiptBtn');
+  if (btn) btn.classList.toggle('active-filter', hideWithReceipt);
+  renderTable();
+}
+
 function getFilteredTxs() {
   return allTransactions.filter(tx => {
     if (!activeBudgets.has(CONFIG.YNAB_BUDGETS.find(b=>b.name===tx.budgetName)?.id)) return false;
+    // Hide transactions that have a receipt when toggle is on
+    if (hideWithReceipt && Drive.state.receipts?.[tx.id]) return false;
     // Category filter only applies in full-access mode; SW View shows all transactions
     if (!isFullAccess) return true;
     if (activeCategories && tx.subtransactions?.length) return tx.subtransactions.some(s=>activeCategories.has(s.category_name));
