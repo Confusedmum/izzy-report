@@ -12,35 +12,11 @@ const PORT = process.env.PORT || 3000;
 const FOLDER_NAME = 'Izzy Report Tool';
 const TIMEOUT_MS = 30_000;
 
-// ─── Google Auth ───────────────────────────────────────────────────────────────
-// Uses a service account (GOOGLE_SERVICE_ACCOUNT_JSON env var) when available,
-// with a fallback to the legacy OAuth refresh-token flow for backwards compat.
-
-let googleReady = false;
-let _serviceAuth = null; // google.auth.GoogleAuth instance (service account)
-
-// Token cache for the legacy OAuth path only.
-let _cachedToken = null;
-let _tokenExpiry = 0;
-
-if (process.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
-  try {
-    const saKey = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
-    _serviceAuth = new google.auth.GoogleAuth({
-      credentials: saKey,
-      scopes: [
-        'https://www.googleapis.com/auth/drive.file',
-        'https://www.googleapis.com/auth/spreadsheets',
-      ],
-    });
-    googleReady = true;
-    console.log('Google auth: using service account —', saKey.client_email);
-  } catch (e) {
-    console.error('Failed to parse GOOGLE_SERVICE_ACCOUNT_JSON:', e.message);
-  }
-}
-
-// Legacy OAuth client — kept for /auth/login and /auth/callback routes.
+// ─── OAuth client ──────────────────────────────────────────────────────────────
+// oauthClient is used only for the /auth/login + /auth/callback flows.
+// Token refresh for Drive API calls is handled by _refreshTokenHttps() below,
+// which uses Node's built-in https module (HTTP/1.1) to avoid the Undici
+// HTTP/2 "Premature close" issue with oauth2.googleapis.com on Render.
 function makeOAuthClient() {
   return new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
@@ -48,9 +24,11 @@ function makeOAuthClient() {
     process.env.GOOGLE_REDIRECT_URI
   );
 }
-const oauthClient = makeOAuthClient();
 
-if (!googleReady && process.env.GOOGLE_REFRESH_TOKEN) {
+const oauthClient = makeOAuthClient();
+let googleReady = false;
+
+if (process.env.GOOGLE_REFRESH_TOKEN) {
   const rt = process.env.GOOGLE_REFRESH_TOKEN.trim();
   if (rt !== process.env.GOOGLE_REFRESH_TOKEN) {
     console.warn('⚠ GOOGLE_REFRESH_TOKEN has leading/trailing whitespace — trimming automatically');
@@ -58,28 +36,33 @@ if (!googleReady && process.env.GOOGLE_REFRESH_TOKEN) {
   }
   oauthClient.setCredentials({ refresh_token: rt });
   googleReady = true;
-  console.log('Google auth: using legacy OAuth refresh token (length', rt.length + ')');
 }
 
-// Returns a valid Bearer token for Drive/Sheets API calls.
-// Uses service account when available, otherwise the legacy OAuth path.
+// Token cache — populated by _refreshTokenHttps(), kept until 60 s before expiry.
+let _cachedToken = null;
+let _tokenExpiry = 0;
+
 async function getToken() {
-  if (_serviceAuth) {
-    // google-auth-library handles caching and renewal automatically.
-    const client = await _serviceAuth.getClient();
-    const tokenResp = await client.getAccessToken();
-    return tokenResp.token;
-  }
-  // ── Legacy OAuth path ──────────────────────────────────────────────────────
   if (_cachedToken && Date.now() < _tokenExpiry - 60_000) return _cachedToken;
-  const data = await _refreshTokenHttps();
-  _cachedToken = data.access_token;
-  _tokenExpiry = Date.now() + (data.expires_in * 1000);
-  console.log(`Access token refreshed via OAuth (expires in ${data.expires_in}s)`);
-  return _cachedToken;
+  try {
+    const data = await _refreshTokenHttps();
+    _cachedToken = data.access_token;
+    _tokenExpiry = Date.now() + (data.expires_in * 1000);
+    console.log(`Access token refreshed (expires in ${data.expires_in}s)`);
+    return _cachedToken;
+  } catch (e) {
+    if (e._oauthError === 'invalid_grant' || (e.message || '').includes('Token has been expired or revoked')) {
+      googleReady = false;
+      driveInitPromise = null;
+      console.error('Refresh token is invalid — admin must reconnect at /auth/login');
+      throw new Error('Google Drive authorization has expired. An admin must visit /auth/login to reconnect.');
+    }
+    throw e;
+  }
 }
 
-// Legacy OAuth token refresh — bypasses gaxios/Undici to avoid the HTTP/2
+// Call the token endpoint directly using Node's built-in https.request().
+// This bypasses gaxios/Undici entirely, which is the root cause of the
 // "Premature close" errors seen on Render with Node 18 native fetch.
 function _refreshTokenHttps() {
   return new Promise((resolve, reject) => {
@@ -460,12 +443,13 @@ app.get('/auth/logout', (req, res) => res.redirect('/'));
 
 // Quick token health-check — visit /auth/token-check to verify the token works
 app.get('/auth/token-check', async (req, res) => {
-  const authMode = _serviceAuth ? 'service-account' : 'oauth-refresh-token';
+  const rt = process.env.GOOGLE_REFRESH_TOKEN;
+  if (!rt) return res.json({ ok: false, error: 'GOOGLE_REFRESH_TOKEN not set', action: 'Visit /auth/login' });
   try {
     const token = await getToken();
-    res.json({ ok: true, authMode, accessTokenPresent: !!token });
+    res.json({ ok: true, authMode: 'oauth', tokenLength: rt.length, accessTokenPresent: !!token });
   } catch (e) {
-    res.json({ ok: false, authMode, error: e.message });
+    res.json({ ok: false, authMode: 'oauth', error: e.message, tokenLength: rt.length, action: 'Visit /auth/login to reconnect' });
   }
 });
 
@@ -978,12 +962,10 @@ app.listen(PORT, () => {
   console.log(`  CLIENT_ID:     ${cid ? cid.slice(0, 24) + '…' : 'NOT SET ⚠'}`);
   console.log(`  CLIENT_SECRET: ${cs  ? `SET (length ${cs.length})` : 'NOT SET ⚠'}`);
   console.log(`  REDIRECT_URI:  ${ru  || 'NOT SET ⚠'}`);
-  if (_serviceAuth) {
-    console.log('  Auth mode:     SERVICE ACCOUNT ✓ (no expiry)');
-  } else if (process.env.GOOGLE_REFRESH_TOKEN) {
-    const rt = process.env.GOOGLE_REFRESH_TOKEN;
-    console.log(`  Auth mode:     OAuth refresh token (length ${rt.length})`);
+  const rt = process.env.GOOGLE_REFRESH_TOKEN;
+  if (rt) {
+    console.log(`  REFRESH_TOKEN: SET (length ${rt.length}, starts "${rt.slice(0,6)}…")`);
   } else {
-    console.log('  Auth mode:     NOT CONFIGURED ⚠ — visit /auth/login to connect.');
+    console.log('  REFRESH_TOKEN: NOT SET ⚠ — visit /auth/login to connect.');
   }
 });
