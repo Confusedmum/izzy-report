@@ -1,5 +1,6 @@
 require('dotenv').config();
 const https   = require('https');
+const ExcelJS = require('exceljs');
 const express = require('express');
 const session = require('express-session');
 const { google } = require('googleapis');
@@ -208,59 +209,58 @@ async function getOrCreateMonthFolder(parentId, monthLabel) {
   return driveMonthFolderIds[monthLabel];
 }
 
-// ─── Revolut Google Sheet ──────────────────────────────────────────────────────
-const REVOLUT_SHEET_NAME = 'Revolut Reimbursement 2026';
-let revolutSheetId = null;
+// ─── Revolut Excel file ────────────────────────────────────────────────────────
+const REVOLUT_XLSX_NAME = 'Revolut Reimbursement 2026.xlsx';
+let revolutXlsxId = null; // cached Drive file ID
 
-async function getOrCreateRevolutSheet() {
-  if (revolutSheetId) return revolutSheetId;
+// Find the xlsx in the receipts folder by name. Returns Drive file ID or null.
+async function findRevolutXlsx() {
+  if (revolutXlsxId) return revolutXlsxId;
   const receiptsFolderId = await getOrCreateReceiptsFolder();
   const q = encodeURIComponent(
-    `name='${REVOLUT_SHEET_NAME}' and '${receiptsFolderId}' in parents and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false`
+    `name='${REVOLUT_XLSX_NAME}' and '${receiptsFolderId}' in parents and trashed=false`
   );
   const data = await driveFetchJson(
     `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id)`
   );
   if (data.files?.length > 0) {
-    revolutSheetId = data.files[0].id;
-    console.log('Found Revolut sheet:', revolutSheetId);
-  } else {
-    const created = await driveFetchJson(
-      'https://www.googleapis.com/drive/v3/files?fields=id',
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: REVOLUT_SHEET_NAME,
-          mimeType: 'application/vnd.google-apps.spreadsheet',
-          parents: [receiptsFolderId],
-        }),
-      }
-    );
-    revolutSheetId = created.id;
-    console.log('Created Revolut sheet:', revolutSheetId);
+    revolutXlsxId = data.files[0].id;
+    console.log('Found Revolut xlsx:', revolutXlsxId);
   }
-  return revolutSheetId;
+  return revolutXlsxId || null;
 }
 
-async function getOrCreateSheetTab(spreadsheetId, tabTitle) {
-  const data = await driveFetchJson(
-    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?fields=sheets.properties`
-  );
-  const existing = data.sheets?.find(s => s.properties.title === tabTitle);
-  if (existing) return existing.properties.sheetId;
+// Upload (create or overwrite) the xlsx buffer to Drive.
+// If fileId is provided, patches the existing file. Otherwise creates a new one.
+async function uploadRevolutXlsx(buf, folderId, fileId) {
+  const mime = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+  const boundary = '-------RevolutXlsxBoundary';
+  const metadata = fileId
+    ? JSON.stringify({ name: REVOLUT_XLSX_NAME })
+    : JSON.stringify({ name: REVOLUT_XLSX_NAME, parents: [folderId] });
 
-  const result = await driveFetchJson(
-    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        requests: [{ addSheet: { properties: { title: tabTitle } } }],
-      }),
-    }
-  );
-  return result.replies[0].addSheet.properties.sheetId;
+  const body = Buffer.concat([
+    Buffer.from(
+      `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${metadata}\r\n` +
+      `--${boundary}\r\nContent-Type: ${mime}\r\n\r\n`
+    ),
+    buf,
+    Buffer.from(`\r\n--${boundary}--`),
+  ]);
+
+  const url = fileId
+    ? `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=multipart&fields=id,webViewLink`
+    : `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,webViewLink`;
+
+  const res = await driveFetch(url, {
+    method: fileId ? 'PATCH' : 'POST',
+    headers: {
+      'Content-Type': `multipart/related; boundary="${boundary}"`,
+      'Content-Length': body.length,
+    },
+    body,
+  });
+  return res.json();
 }
 
 async function getDriveFolder() {
@@ -359,11 +359,10 @@ app.use(session({
 app.use(express.json({ limit: '15mb' }));
 
 // ─── Auth routes ───────────────────────────────────────────────────────────────
-// NOTE: spreadsheets scope was added later — existing refresh tokens won't have
-// it. The admin must re-auth at /auth/login once to get a new token.
+// drive.file is the only scope needed — receipts and the Revolut xlsx file
+// are both stored in Drive. The spreadsheets scope has been removed entirely.
 const SCOPES = [
   'https://www.googleapis.com/auth/drive.file',
-  'https://www.googleapis.com/auth/spreadsheets',
 ];
 
 app.get('/auth/login', (req, res) => {
@@ -645,10 +644,10 @@ app.get('/api/drive/test', requireDrive, async (req, res) => {
   }
 });
 
-// ─── Revolut Summary → Google Sheet ───────────────────────────────────────────
+// ─── Revolut Summary → Excel (.xlsx) ──────────────────────────────────────────
 // Body: { month: "June 2026", rows: [{ values: [...], bold: bool }, ...] }
-// Finds/creates the spreadsheet in the Receipts folder, finds/creates the month
-// tab, appends all rows, then batch-formats the bold ones.
+// Finds or creates Revolut Reimbursement 2026.xlsx in the receipts Drive folder.
+// Adds/replaces the month sheet inside the workbook and overwrites the file.
 app.post('/api/sheets/revolut-summary', requireDrive, async (req, res) => {
   try {
     const { month, rows } = req.body;
@@ -656,53 +655,48 @@ app.post('/api/sheets/revolut-summary', requireDrive, async (req, res) => {
       return res.status(400).json({ error: 'month and rows are required' });
     }
 
-    const spreadsheetId = await getOrCreateRevolutSheet();
-    const sheetId       = await getOrCreateSheetTab(spreadsheetId, month);
+    const receiptsFolderId = await getOrCreateReceiptsFolder();
+    const existingId = await findRevolutXlsx();
 
-    // Count existing rows so we know where new data starts (for bold offsets)
-    const existing = await driveFetchJson(
-      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(month)}?fields=values`
-    ).catch(() => ({ values: [] }));
-    const startRowIndex = existing.values?.length || 0;
-
-    // Append all row values in one call
-    await driveFetchJson(
-      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(month)}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ values: rows.map(r => r.values) }),
-      }
-    );
-
-    // Apply bold formatting to rows flagged bold
-    const boldRequests = rows
-      .map((row, i) => row.bold ? {
-        repeatCell: {
-          range: {
-            sheetId,
-            startRowIndex: startRowIndex + i,
-            endRowIndex:   startRowIndex + i + 1,
-          },
-          cell: { userEnteredFormat: { textFormat: { bold: true } } },
-          fields: 'userEnteredFormat.textFormat.bold',
-        },
-      } : null)
-      .filter(Boolean);
-
-    if (boldRequests.length) {
-      await driveFetchJson(
-        `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ requests: boldRequests }),
-        }
+    // Load existing workbook or create a fresh one
+    const wb = new ExcelJS.Workbook();
+    if (existingId) {
+      // Download current file content
+      const dlRes = await driveFetch(
+        `https://www.googleapis.com/drive/v3/files/${existingId}?alt=media`
       );
+      const arrayBuf = await dlRes.arrayBuffer();
+      await wb.xlsx.load(Buffer.from(arrayBuf));
     }
 
-    const url = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit#gid=${sheetId}`;
-    console.log(`Revolut summary written to "${month}" tab`);
+    // Remove existing sheet for this month (if any) so we start clean
+    const existing = wb.getWorksheet(month);
+    if (existing) wb.removeWorksheet(existing.id);
+
+    // Add fresh sheet for this month
+    const ws = wb.addWorksheet(month);
+    rows.forEach(({ values, bold }) => {
+      const row = ws.addRow(values);
+      if (bold) row.font = { bold: true };
+    });
+
+    // Auto-fit column widths based on content
+    ws.columns.forEach(col => {
+      let max = 10;
+      col.eachCell({ includeEmpty: false }, cell => {
+        const len = cell.value ? String(cell.value).length : 0;
+        if (len > max) max = len;
+      });
+      col.width = Math.min(max + 2, 60);
+    });
+
+    // Write workbook to buffer and upload to Drive
+    const buf = await wb.xlsx.writeBuffer();
+    const uploaded = await uploadRevolutXlsx(Buffer.from(buf), receiptsFolderId, existingId);
+    if (!existingId) revolutXlsxId = uploaded.id;
+
+    const url = uploaded.webViewLink || `https://drive.google.com/file/d/${uploaded.id}/view`;
+    console.log(`Revolut summary written to "${month}" sheet in xlsx`);
     res.json({ ok: true, url });
   } catch (e) {
     console.error('Revolut summary error:', e.message);
