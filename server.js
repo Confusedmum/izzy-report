@@ -358,6 +358,43 @@ app.use(session({
 
 app.use(express.json({ limit: '15mb' }));
 
+// Persists the refresh token to Render's environment so it survives restarts.
+// Fires in the background after a successful OAuth callback.
+async function saveTokenToRender(refreshToken) {
+  const apiKey     = process.env.RENDER_API_KEY;
+  const serviceId  = process.env.RENDER_SERVICE_ID;
+  if (!apiKey || !serviceId) return; // env vars not configured — skip silently
+
+  // Fetch current env vars for this service
+  const listRes = await fetch(
+    `https://api.render.com/v1/services/${serviceId}/env-vars`,
+    { headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' } }
+  );
+  if (!listRes.ok) throw new Error(`Render API list failed: ${listRes.status}`);
+  const existing = await listRes.json();
+
+  // Build updated list — replace GOOGLE_REFRESH_TOKEN, keep everything else
+  const updated = existing.map(({ envVar }) =>
+    envVar.key === 'GOOGLE_REFRESH_TOKEN'
+      ? { key: 'GOOGLE_REFRESH_TOKEN', value: refreshToken }
+      : { key: envVar.key, value: envVar.value }
+  );
+  if (!updated.find(e => e.key === 'GOOGLE_REFRESH_TOKEN')) {
+    updated.push({ key: 'GOOGLE_REFRESH_TOKEN', value: refreshToken });
+  }
+
+  const putRes = await fetch(
+    `https://api.render.com/v1/services/${serviceId}/env-vars`,
+    {
+      method: 'PUT',
+      headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify(updated),
+    }
+  );
+  if (!putRes.ok) throw new Error(`Render API update failed: ${putRes.status}`);
+  console.log('Refresh token auto-saved to Render env vars');
+}
+
 // ─── Auth routes ───────────────────────────────────────────────────────────────
 // drive.file is the only scope needed — receipts and the Revolut xlsx file
 // are both stored in Drive. The spreadsheets scope has been removed entirely.
@@ -383,6 +420,10 @@ app.get('/auth/callback', async (req, res) => {
       process.env.GOOGLE_REFRESH_TOKEN = tokens.refresh_token;
       _cachedToken = null;
       _tokenExpiry = 0;
+      // Auto-save to Render env var so the token survives server restarts.
+      saveTokenToRender(tokens.refresh_token).catch(e =>
+        console.warn('Could not auto-save token to Render:', e.message)
+      );
     }
     googleReady = true;
     driveInitPromise = null;
