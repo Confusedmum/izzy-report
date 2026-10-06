@@ -598,7 +598,7 @@ async function loadTransactions() {
       const data = await res.json();
       if (!res.ok) { errors.push(`${budget.name}: ${data.error?.detail||'Error'}`); return []; }
       const all = data.data.transactions||[];
-      const filtered = all.filter(tx=>tx.date<=to&&!tx.deleted);
+      const filtered = all.filter(tx=>tx.date<=to&&!tx.deleted&&tx.flag_color!=='blue');
       if (all.length !== filtered.length) console.log(`${budget.name}: ${all.length} from YNAB, ${filtered.length} after date/deleted filter`);
       return filtered.map(tx=>({...tx, budgetName:budget.name, currency:budget.currency}));
     } catch(e) { errors.push(`${budget.name}: Network error`); return []; }
