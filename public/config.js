@@ -7,6 +7,7 @@ const CONFIG = {
     { id: '2a2cfa26-7444-4e99-ad26-7a5bfe3fcdc2', name: 'Revolut Recurring Expenses', currency: 'GBP', workerAccess: false },
     { id: '702ef32b-2115-4ace-ab0c-439f14573c00', name: 'First Direct',                currency: 'GBP', workerAccess: false },
     { id: '15d6c416-93fe-4a48-8c6a-2fb0d696bcd1', name: 'Revolut USD',      currency: 'USD', workerAccess: false },
-    { id: 'd58daf8b-4851-4d4e-be10-b14eb7d5c9fd', name: 'Revolut EUR',      currency: 'EUR', workerAccess: false }
+    { id: 'd58daf8b-4851-4d4e-be10-b14eb7d5c9fd', name: 'Revolut EUR',      currency: 'EUR', workerAccess: false },
+    { id: '636a3ce1-0744-474f-8946-f417b45b4ab9', name: 'Combined Accounts', currency: 'GBP', workerAccess: false }
   ]
 };
